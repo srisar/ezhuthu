@@ -2,3 +2,5 @@
 *.tsv text eol=lf
 *.onnx binary
 *.bin binary
+*.sh text eol=lf
+*.sha256 text eol=lf
