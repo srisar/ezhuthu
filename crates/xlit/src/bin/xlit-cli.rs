@@ -1,6 +1,7 @@
 //! `xlit-cli natchathiram` prints the top-5 Tamil candidates.
 //!
-//! Options: `--assets DIR` (default: $EZHUTHU_ASSETS, ./assets, then the
+//! Options: `--raw` (skip word-frequency rescoring), `--assets DIR`
+//! (default: $EZHUTHU_ASSETS, ./assets, then the
 //! workspace assets/), `--beam N`, `--bench FILE` (time every first-column
 //! word in a TSV, e.g. tests/words.tsv).
 
@@ -26,14 +27,18 @@ fn main() -> Result<()> {
     let mut assets = None;
     let mut beam = DEFAULT_BEAM;
     let mut bench = None;
+    let mut raw = false;
     let mut words = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--assets" => assets = Some(PathBuf::from(args.next().context("--assets DIR")?)),
             "--beam" => beam = args.next().context("--beam N")?.parse()?,
             "--bench" => bench = Some(PathBuf::from(args.next().context("--bench FILE")?)),
+            "--raw" => raw = true,
             "-h" | "--help" => {
-                println!("usage: xlit-cli [--assets DIR] [--beam N] [--bench FILE] WORD...");
+                println!(
+                    "usage: xlit-cli [--assets DIR] [--beam N] [--raw] [--bench FILE] WORD..."
+                );
                 return Ok(());
             }
             _ => words.push(arg),
@@ -42,10 +47,21 @@ fn main() -> Result<()> {
     let assets = assets.unwrap_or_else(default_assets);
 
     let t0 = Instant::now();
-    let xlit = Transliterator::load(&assets)
+    let mut xlit = Transliterator::load(&assets)
         .with_context(|| format!("loading assets from {}", assets.display()))?
         .with_beam(beam);
-    eprintln!("loaded in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+    if raw {
+        xlit = xlit.without_word_freq();
+    }
+    eprintln!(
+        "loaded in {:.0} ms ({})",
+        t0.elapsed().as_secs_f64() * 1000.0,
+        if xlit.has_word_freq() {
+            "word-frequency rescoring on"
+        } else {
+            "raw beam order"
+        }
+    );
 
     if let Some(file) = bench {
         return run_bench(&xlit, &file);
