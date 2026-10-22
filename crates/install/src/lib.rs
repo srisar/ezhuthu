@@ -33,10 +33,40 @@ const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const UNINSTALL_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ezhuthu");
 const VALUE_NAME: PCWSTR = w!("ezhuthu");
 
-/// `%LOCALAPPDATA%\Programs\ezhuthu`, the usual per-user program folder.
-pub fn install_dir() -> Result<PathBuf> {
+/// Lists the files setup installed, for uninstall (see [`record_files`]).
+pub const FILE_LIST: &str = "install-files.txt";
+
+/// `%LOCALAPPDATA%\Programs`, the usual per-user program location and the
+/// folder picker's starting point.
+pub fn default_parent() -> Result<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set")?;
-    Ok(PathBuf::from(local).join("Programs").join(APP_NAME))
+    Ok(PathBuf::from(local).join("Programs"))
+}
+
+/// Install folder for a location the user picked: `<parent>\ezhuthu`, or the
+/// picked folder itself if it is already named "ezhuthu".
+pub fn dir_in(parent: &Path) -> PathBuf {
+    let named_ours = parent
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case(APP_NAME));
+    if named_ours {
+        parent.to_path_buf()
+    } else {
+        parent.join(APP_NAME)
+    }
+}
+
+/// Where ezhuthu is installed, from its Settings > Apps entry, if the
+/// program is still there.
+pub fn installed_dir() -> Option<PathBuf> {
+    let dir = PathBuf::from(read_str(UNINSTALL_KEY, w!("InstallLocation"))?);
+    dir.join(EXE_NAME).is_file().then_some(dir)
+}
+
+/// True if `a` and `b` name the same folder (case-insensitive, as on NTFS).
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| p.to_string_lossy().trim_end_matches('\\').to_lowercase();
+    norm(a) == norm(b)
 }
 
 /// `%APPDATA%\Microsoft\Windows\Start Menu\Programs\ezhuthu.lnk`.
@@ -117,14 +147,19 @@ impl Drop for Key {
 
 /// The command stored in HKCU Run, if "Start with Windows" is on.
 pub fn autostart_command() -> Option<String> {
+    read_str(RUN_KEY, VALUE_NAME)
+}
+
+/// Reads a REG_SZ value under HKCU.
+fn read_str(subkey: PCWSTR, value: PCWSTR) -> Option<String> {
     let mut buf = vec![0u16; 1024];
     let mut len = (buf.len() * 2) as u32;
     // SAFETY: `buf` holds `len` bytes; RegGetValueW NUL-terminates REG_SZ.
     let err = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
-            RUN_KEY,
-            VALUE_NAME,
+            subkey,
+            value,
             RRF_RT_REG_SZ,
             None,
             Some(buf.as_mut_ptr().cast()),
@@ -264,10 +299,20 @@ pub fn close_running_app(timeout: Duration) -> bool {
 
 // ---------------------------------------------------------------- uninstall
 
+/// Records which files setup put in `dir` (paths relative to it, `/`-separated),
+/// so uninstall deletes exactly those and never anything else in a folder
+/// the user chose.
+pub fn record_files(dir: &Path, files: &[&str]) -> Result<()> {
+    let path = dir.join(FILE_LIST);
+    std::fs::write(&path, files.join("\n") + "\n")
+        .with_context(|| format!("writing {}", path.display()))
+}
+
 /// Removes ezhuthu for this user: stops it, deletes the Run value, uninstall
-/// entry and shortcut, then deletes `dir` once this process has exited (it
-/// may be running from that folder). User settings in %APPDATA% are kept.
+/// entry and shortcut, then deletes the installed files once this process has
+/// exited (it may be running from `dir`). User settings in %APPDATA% are kept.
 pub fn uninstall(dir: &Path) -> Result<()> {
+    let files = installed_files(dir)?;
     if !close_running_app(Duration::from_secs(5)) {
         bail!("ezhuthu is still running; quit it from the tray and try again");
     }
@@ -276,27 +321,114 @@ pub fn uninstall(dir: &Path) -> Result<()> {
     if let Ok(lnk) = start_menu_shortcut() {
         let _ = std::fs::remove_file(lnk);
     }
-    delete_after_exit(dir)
+    delete_after_exit(dir, &files)
 }
 
-/// Deletes `dir` from a hidden `cmd` that first waits ~2 s for us to exit.
-fn delete_after_exit(dir: &Path) -> Result<()> {
+/// The recorded file list, validated: plain relative paths inside `dir`.
+fn installed_files(dir: &Path) -> Result<Vec<String>> {
+    let list = dir.join(FILE_LIST);
+    let text = match std::fs::read_to_string(&list) {
+        Ok(t) => t,
+        // No list (an older install): remove only the program itself.
+        Err(_) => return Ok(vec![EXE_NAME.to_string()]),
+    };
+    let mut files = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let safe = !line.contains("..")
+            && !line.contains(':')
+            && !line.contains('"')
+            && !line.starts_with(['/', '\\']);
+        if !safe {
+            bail!(
+                "refusing to uninstall: unexpected entry {line:?} in {}",
+                list.display()
+            );
+        }
+        files.push(line.replace('/', "\\"));
+    }
+    Ok(files)
+}
+
+/// Deletes the installed `files`, the file list, then the folders they were in
+/// (only if empty), from a hidden `cmd` that first waits ~2 s for us to exit.
+fn delete_after_exit(dir: &Path, files: &[String]) -> Result<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    // Only ever delete the folder this crate installs to.
-    if dir != install_dir()? {
+    if dir.parent().is_none() {
         bail!(
-            "refusing to delete {}: not the ezhuthu install folder",
+            "refusing to uninstall from a drive root ({})",
             dir.display()
         );
     }
+    let mut cmd = String::from("/d /c ping -n 3 127.0.0.1 >nul");
+    for f in files.iter().map(String::as_str).chain([FILE_LIST]) {
+        cmd += &format!(" & del /f /q \"{}\"", dir.join(f).display());
+    }
+    // Subfolders deepest first, then the install folder; `rd` without /s
+    // leaves any folder that still holds files the user put there.
+    let mut subdirs: Vec<PathBuf> = files
+        .iter()
+        .filter_map(|f| Path::new(f).parent().map(Path::to_path_buf))
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    subdirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    subdirs.dedup();
+    for d in subdirs {
+        cmd += &format!(" & rd \"{}\" 2>nul", dir.join(d).display());
+    }
+    cmd += &format!(" & rd \"{}\" 2>nul", dir.display());
     std::process::Command::new("cmd.exe")
-        .raw_arg(format!(
-            "/d /c ping -n 3 127.0.0.1 >nul & rd /s /q \"{}\"",
-            dir.display()
-        ))
+        .raw_arg(cmd)
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .context("starting the cleanup process")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_folder_is_a_subfolder_unless_already_named_ezhuthu() {
+        assert_eq!(
+            dir_in(Path::new(r"D:\Tools")),
+            Path::new(r"D:\Tools\ezhuthu")
+        );
+        assert_eq!(
+            dir_in(Path::new(r"D:\Apps\Ezhuthu")),
+            Path::new(r"D:\Apps\Ezhuthu")
+        );
+        assert_eq!(dir_in(Path::new(r"D:\")), Path::new(r"D:\ezhuthu"));
+    }
+
+    #[test]
+    fn compares_folders_like_ntfs() {
+        assert!(same_dir(
+            Path::new(r"C:\Apps\ezhuthu"),
+            Path::new(r"c:\apps\EZHUTHU\")
+        ));
+        assert!(!same_dir(
+            Path::new(r"C:\Apps\ezhuthu"),
+            Path::new(r"C:\Apps\other")
+        ));
+    }
+
+    #[test]
+    fn file_list_rejects_paths_outside_the_folder() {
+        let dir = std::env::temp_dir().join(format!("ezhuthu-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        record_files(&dir, &["ezhuthu.exe", "assets/vocab_src.json"]).unwrap();
+        assert_eq!(
+            installed_files(&dir).unwrap(),
+            ["ezhuthu.exe", r"assets\vocab_src.json"]
+        );
+        for bad in [r"..\evil.txt", r"C:\Windows\x", r"\x", "a\"b"] {
+            record_files(&dir, &[bad]).unwrap();
+            assert!(installed_files(&dir).is_err(), "{bad} should be rejected");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        // no list (older install): only the program itself
+        assert_eq!(installed_files(&dir).unwrap(), [EXE_NAME]);
+    }
 }

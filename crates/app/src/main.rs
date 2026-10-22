@@ -62,8 +62,12 @@ fn uninstall() {
     let here = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|d| d.to_path_buf()));
-    let installed = ezhuthu_install::install_dir().ok();
-    let Some(dir) = here.filter(|d| Some(d) == installed.as_ref()) else {
+    let installed = ezhuthu_install::installed_dir();
+    let Some(dir) = here.filter(|d| {
+        installed
+            .as_deref()
+            .is_some_and(|i| ezhuthu_install::same_dir(d, i))
+    }) else {
         fail("This copy of ezhuthu isn't the installed one, so there is nothing to uninstall.");
         return;
     };

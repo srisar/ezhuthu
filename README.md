@@ -17,13 +17,13 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 
 ## Install
 
-Run `ezhuthu-setup-<version>.exe`. It installs for the current user only, with no administrator rights, into `%LOCALAPPDATA%\Programs\ezhuthu`, and it:
+Run `ezhuthu-setup-<version>.exe`. It installs for the current user only, with no administrator rights, into a folder you choose. The folder picker starts at `%LOCALAPPDATA%\Programs`, and an `ezhuthu` folder is created in the location you pick. Setup also:
 - adds a Start Menu shortcut;
 - adds an entry in **Settings > Apps**, whose uninstall runs `ezhuthu.exe --uninstall`;
 - asks whether to start with Windows (change it later from the tray menu's **Start with Windows**);
 - starts the app.
 
-Running a newer setup updates an existing install in place, and settings in `%APPDATA%\ezhuthu` are kept. The setup isn't code-signed yet, so Windows SmartScreen may warn the first time. Choose **More info > Run anyway**.
+Running a newer setup updates an existing install in place, and settings in `%APPDATA%\ezhuthu` are kept. Uninstall removes only the files setup installed, listed in `install-files.txt`, so other files in a folder you picked are left alone. Unattended install: `ezhuthu-setup.exe --silent [--dir <folder>] [--autostart] [--no-launch]`. The setup isn't code-signed yet, so Windows SmartScreen may warn the first time. Choose **More info > Run anyway**.
 
 To build the installer (after `tools/fetch-assets.sh`):
 
