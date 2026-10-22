@@ -1,0 +1,4 @@
+* text=auto
+*.tsv text eol=lf
+*.onnx binary
+*.bin binary
