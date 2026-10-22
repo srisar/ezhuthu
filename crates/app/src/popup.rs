@@ -333,6 +333,11 @@ fn text(dc: HDC, font: HFONT, color: SysColor, r: RECT, s: &str, align: DRAW_TEX
 }
 
 fn text_rgb(dc: HDC, font: HFONT, color: COLORREF, mut r: RECT, s: &str, align: DRAW_TEXT_FORMAT) {
+    // An empty slice has a dangling pointer, and DrawTextW reads it even
+    // with a length of 0 (it crashed user32), so never pass one.
+    if s.is_empty() {
+        return;
+    }
     let mut buf: Vec<u16> = s.encode_utf16().collect();
     // SAFETY: `dc` is a valid DC; the font stays alive while selected.
     unsafe {
@@ -350,6 +355,9 @@ fn text_rgb(dc: HDC, font: HFONT, color: COLORREF, mut r: RECT, s: &str, align: 
 /// Left-aligned text, but right-aligned when too long, so the end
 /// (where the user is typing) stays visible.
 fn text_tail(dc: HDC, font: HFONT, color: SysColor, r: RECT, s: &str) {
+    if s.is_empty() {
+        return; // see text_rgb
+    }
     let mut buf: Vec<u16> = s.encode_utf16().collect();
     let mut calc = r;
     // SAFETY: DT_CALCRECT only measures.
@@ -368,4 +376,43 @@ fn text_tail(dc: HDC, font: HFONT, color: SysColor, r: RECT, s: &str) {
         DT_LEFT
     };
     text(dc, font, color, r, s, align);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
+
+    unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+        // SAFETY: default processing for a test window.
+        unsafe { DefWindowProcW(h, m, w, l) }
+    }
+
+    fn view(input: &str, preview: &str, candidates: &[&str]) -> View {
+        View {
+            input: input.into(),
+            preview: preview.into(),
+            candidates: candidates.iter().map(|s| s.to_string()).collect(),
+            selected: 0,
+            hint: String::new(),
+            warn: false,
+        }
+    }
+
+    /// Regression: painting the just-opened popup (empty preview and hint)
+    /// crashed inside DrawTextW.
+    #[test]
+    fn paints_empty_and_filled_views() {
+        let mut popup = Popup::create(Some(proc), 5).unwrap();
+        // SAFETY: a memory DC, deleted below.
+        let dc = unsafe { CreateCompatibleDC(None) };
+        for dpi in [96, 144] {
+            popup.set_dpi(dpi);
+            popup.paint(dc, &view("", "", &[]));
+            popup.paint(dc, &view("amma", "அம்மா", &["அம்மா", "ஆம்மா"]));
+        }
+        // SAFETY: we created it.
+        let _ = unsafe { DeleteDC(dc) };
+    }
 }
