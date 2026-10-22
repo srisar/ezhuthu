@@ -26,10 +26,15 @@ use windows::core::PCWSTR;
 use crate::win::{copy_into, wide};
 
 const ICON_ID: u32 = 1;
+/// Icon backgrounds (BGR): blue while Tamil mode is on, grey while off.
+const ON_BG: COLORREF = COLORREF(0x00B0_5A1F); // #1F5AB0
+const OFF_BG: COLORREF = COLORREF(0x0080_8080); // #808080
 
 pub struct Tray {
     hwnd: HWND,
-    icon: HICON,
+    icon_on: HICON,
+    icon_off: HICON,
+    active: bool,
     callback: u32,
     tip: String,
 }
@@ -38,7 +43,9 @@ impl Tray {
     pub fn add(hwnd: HWND, callback: u32, tip: &str) -> Result<Self> {
         let tray = Self {
             hwnd,
-            icon: make_icon()?,
+            icon_on: make_icon(ON_BG)?,
+            icon_off: make_icon(OFF_BG)?,
+            active: false,
             callback,
             tip: tip.to_string(),
         };
@@ -55,12 +62,20 @@ impl Tray {
         }
     }
 
+    fn icon(&self) -> HICON {
+        if self.active {
+            self.icon_on
+        } else {
+            self.icon_off
+        }
+    }
+
     /// Adds the icon; also used after Explorer restarts ("TaskbarCreated").
     pub fn register(&self) -> Result<()> {
         let mut d = self.data();
         d.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
         d.uCallbackMessage = self.callback;
-        d.hIcon = self.icon;
+        d.hIcon = self.icon();
         copy_into(&mut d.szTip, &self.tip);
         // SAFETY: `d` is a fully initialised NOTIFYICONDATAW.
         unsafe {
@@ -73,10 +88,13 @@ impl Tray {
         Ok(())
     }
 
-    pub fn set_tip(&mut self, tip: &str) {
+    /// Switches the icon (on/off) and tooltip.
+    pub fn set_state(&mut self, active: bool, tip: &str) {
+        self.active = active;
         self.tip = tip.to_string();
         let mut d = self.data();
-        d.uFlags = NIF_TIP | NIF_SHOWTIP;
+        d.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        d.hIcon = self.icon();
         copy_into(&mut d.szTip, tip);
         // SAFETY: as in `register`.
         let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &d) };
@@ -96,60 +114,59 @@ impl Tray {
         // SAFETY: as in `register`.
         let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &self.data()) };
     }
+}
 
-    /// Shows the menu at the cursor; returns the chosen item id (0 = none).
-    /// Items: (id, label); id 0 is a disabled header, a "-" label a separator.
-    pub fn menu(&self, items: &[(usize, &str)]) -> usize {
-        // SAFETY: the menu is destroyed before returning; label buffers
-        // outlive AppendMenuW, which copies them.
-        unsafe {
-            let Ok(menu) = CreatePopupMenu() else {
-                return 0;
+/// Shows a context menu for `owner` at the cursor; returns the chosen item id
+/// (0 = none). Items: (id, label); id 0 is a disabled header, "-" a
+/// separator. Runs a modal loop, so call it without holding the app state.
+pub fn menu(owner: HWND, items: &[(usize, &str)]) -> usize {
+    // SAFETY: the menu is destroyed before returning; label buffers
+    // outlive AppendMenuW, which copies them.
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            return 0;
+        };
+        for &(id, label) in items {
+            let text = wide(label);
+            let flags = match (id, label) {
+                (_, "-") => MF_SEPARATOR,
+                (0, _) => MF_STRING | MF_GRAYED,
+                _ => MF_STRING,
             };
-            for &(id, label) in items {
-                let text = wide(label);
-                let flags = match (id, label) {
-                    (_, "-") => MF_SEPARATOR,
-                    (0, _) => MF_STRING | MF_GRAYED,
-                    _ => MF_STRING,
-                };
-                let _ = AppendMenuW(menu, flags, id, PCWSTR(text.as_ptr()));
-            }
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            // Required so the menu closes when the user clicks elsewhere.
-            let _ = SetForegroundWindow(self.hwnd);
-            let id = TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-                pt.x,
-                pt.y,
-                None,
-                self.hwnd,
-                None,
-            );
-            let _ = PostMessageW(
-                Some(self.hwnd),
-                WM_NULL,
-                Default::default(),
-                Default::default(),
-            );
-            let _ = DestroyMenu(menu);
-            id.0 as usize
+            let _ = AppendMenuW(menu, flags, id, PCWSTR(text.as_ptr()));
         }
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        // Required so the menu closes when the user clicks elsewhere.
+        let _ = SetForegroundWindow(owner);
+        let id = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            None,
+            owner,
+            None,
+        );
+        let _ = PostMessageW(Some(owner), WM_NULL, Default::default(), Default::default());
+        let _ = DestroyMenu(menu);
+        id.0 as usize
     }
 }
 
 impl Drop for Tray {
     fn drop(&mut self) {
-        // SAFETY: we created the icon.
-        let _ = unsafe { DestroyIcon(self.icon) };
+        // SAFETY: we created the icons.
+        unsafe {
+            let _ = DestroyIcon(self.icon_on);
+            let _ = DestroyIcon(self.icon_off);
+        }
     }
 }
 
-/// Draws the tray icon at runtime: a white "எ" on a blue square, so the
+/// Draws the tray icon at runtime: a white "எ" on a `bg` square, so the
 /// exe needs no resource file.
-fn make_icon() -> Result<HICON> {
+fn make_icon(bg_color: COLORREF) -> Result<HICON> {
     // SAFETY: every GDI object created here is selected out and deleted
     // before returning; the DIB is 32 bpp, top-down, size x size.
     unsafe {
@@ -179,7 +196,7 @@ fn make_icon() -> Result<HICON> {
             right: size,
             bottom: size,
         };
-        let bg = CreateSolidBrush(COLORREF(0x00B0_5A1F)); // BGR: #1F5AB0
+        let bg = CreateSolidBrush(bg_color);
         FillRect(dc, &rect, bg);
         let font = CreateFontW(
             -(size * 7 / 8),

@@ -181,19 +181,27 @@ These were checked against `app/ai4bharat/transliteration/transformer/base_engin
 >
 > As built in `crates/app`:
 > - **Popup window:** `WS_POPUP` with `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`, shown with `SWP_NOACTIVATE`, and returning `MA_NOACTIVATE` to mouse activation. The target app keeps keyboard focus the whole time.
-> - **Keyboard capture:** a `WH_KEYBOARD_LL` hook is installed only while the popup is visible. It posts keys to the popup and swallows them.
->   - Characters come from `ToUnicodeEx` in the foreground window's layout, without disturbing dead-key state.
->   - Alt/Win combinations (Alt+Tab, Win+D…) and unhandled Ctrl combinations close the popup and pass through.
->   - Pressing the hotkey again closes the popup.
-> - **Drawing:** no EDIT, STATIC or LISTBOX controls. The input line, preview, candidates and hint are painted with GDI `DrawTextW`, which shapes Tamil through Uniscribe, in Nirmala UI.
-> - **Editing:** keys handled are letters/punctuation, Backspace, Ctrl+Backspace (delete word), Ctrl+V (paste into the popup), ↑/↓, 1–N, Space, Enter and Esc. There's no caret movement inside the line. Clicking a candidate picks it.
-> - **Cancel triggers:** Esc, the hotkey again, or another window coming to the foreground (`SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`). Losing focus no longer applies, since the popup never has focus.
-> - **Insert:** no `SetForegroundWindow`. The target is still focused, so the text is typed straight in after the hook is removed. Insertion is refused if the foreground window changed.
-> - **Elevated targets** are detected when the hotkey is pressed: the target's token can't be read, or reports `TokenIsElevated`. In that case the popup doesn't open (UIPI would block both the hook and SendInput) and a tray notice explains why.
-> - **Model work** runs on a worker thread (`engine.rs`): newest request first, results posted back with `PostMessageW` and cached per word. If Enter arrives before a word's result, that word is transliterated synchronously.
+> - **Tamil mode (user decision, 2026-10-22):** the hotkey toggles a persistent mode instead of opening a one-shot popup. Each word is committed on Space, like Google Input Tools. The tray icon is blue when the mode is on and grey when it's off.
+> - **Keyboard capture:** a `WH_KEYBOARD_LL` hook is installed while Tamil mode is on. All key logic runs synchronously inside the hook, so its state always matches the key stream.
+>   - A letter starts or extends a word, and the popup shows candidates at the caret.
+>   - Space commits the word with a space, Enter commits it without one, and 1–N commits that candidate with a space. ↑/↓ select, Backspace edits, and Esc or Ctrl+Backspace drop the word.
+>   - Mid-word, any other key (Tab, arrows, Ctrl+S, …) commits the word first and then passes through. Alt/Win combinations drop the word and pass through.
+>   - With no word in progress, everything except letters passes through untouched (digits, punctuation, Enter, shortcuts).
+>   - Characters come from `ToUnicodeEx` in the foreground window's layout, without disturbing dead-key state. Pressing the hotkey while the mode is on (seen by the hook) turns it off.
+> - **Drawing:** no EDIT, STATIC or LISTBOX controls. The word, its Tamil preview, the candidates and the hint are painted with GDI `DrawTextW`, which shapes Tamil through Uniscribe, in Nirmala UI. Clicking a candidate commits it.
+> - **Ordering:**
+>   - Committed text goes into an outbox. It's injected from the message loop, never inside the hook.
+>   - Every injected event carries `insert::MARK` in `dwExtraInfo`, so the hook passes it through and counts it back.
+>   - Until all of our events have come back, real keys that would pass through are queued behind the output and replayed in order. That keeps `amma` Space `,` from turning into `, அம்மா`.
+>   - A 500 ms timeout stops events dropped by UIPI from holding keys back forever.
+>   - The harness tests confirm both the paced and the no-pause sequences.
+> - **Word dropped on focus change:** when another window comes to the foreground (`SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`), the word in progress is dropped. Tamil mode stays on.
+> - **Insert:** no `SetForegroundWindow`. Output goes to whichever app has focus.
+> - **Elevated targets:** Windows (UIPI) hides their keys from our hook and drops our SendInput, so they simply get normal English typing. Turning the mode on while one is in the foreground shows a tray notice.
+> - **Model work** runs on a worker thread (`engine.rs`): newest request first, results posted back with `PostMessageW` and cached per word. If a word is committed before its result arrives, it is transliterated synchronously.
 > - **Single instance:** a `Local\ezhuthu-single-instance` mutex.
-> - **Tray icon:** drawn at runtime (a white எ on blue), so there's no resource file. The icon is re-added on `TaskbarCreated` after an Explorer restart.
-> - **DPI:** the per-monitor-v2 manifest is embedded with `/MANIFEST:EMBED /MANIFESTINPUT` from `build.rs`, with no extra crate. Fonts and layout are scaled to the caret monitor's DPI each time the popup opens.
+> - **Tray icon:** drawn at runtime (a white எ on blue, or on grey while the mode is off), so there's no resource file. The icon is re-added on `TaskbarCreated` after an Explorer restart.
+> - **DPI:** the per-monitor-v2 manifest is embedded with `/MANIFEST:EMBED /MANIFESTINPUT` from `build.rs`, with no extra crate. Fonts and layout are scaled to the caret monitor's DPI each time a word starts.
 >
 > The original text is kept below for reference.
 

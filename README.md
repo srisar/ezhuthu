@@ -22,18 +22,21 @@ cargo build --release -p ezhuthu
 ./target/release/ezhuthu.exe
 ```
 
-`ezhuthu.exe` lives in the tray. In any app, press **Ctrl+Alt+T**, type Tamil in English letters, then:
+`ezhuthu.exe` lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray icon is blue when it's on and grey when it's off. While it's on, type Tamil in English letters in any app, a word at a time. A popup at the caret shows the candidates:
 
-| Key | Action |
+| Key (while a word is in progress) | Action |
 |---|---|
-| ↑ / ↓, or 1–5 | choose a candidate (a digit picks it and moves to the next word) |
-| Space | keep the chosen candidate and start the next word |
-| Backspace / Ctrl+Backspace | delete a letter / a word |
-| Ctrl+V | paste text into the popup |
-| Enter | type the Tamil phrase into the app |
-| Esc | cancel |
+| Space | insert the chosen Tamil word and a space |
+| Enter | insert the chosen word without a space |
+| 1–5 | insert that candidate and a space |
+| ↑ / ↓ | choose a candidate |
+| Backspace / Ctrl+Backspace | delete a letter / drop the word |
+| Esc | drop the word |
+| any other key (Tab, arrows, Ctrl+S…) | insert the word, then the key does its usual job |
 
-The popup never takes focus, so it also works over the Start/search box. Settings are in `%APPDATA%\ezhuthu\config.toml`; use "Open settings file" in the tray menu. It looks for model files in `assets/` next to the exe, or in the workspace `assets/` when run from a cargo build.
+When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start/search box.
+
+Settings are in `%APPDATA%\ezhuthu\config.toml`; use "Open settings file" in the tray menu. The app looks for model files in `assets/` next to the exe. Dev builds (`dev` and `fast` profiles) also look in the workspace `assets/`.
 
 ## Transliteration library and CLI (Rust)
 

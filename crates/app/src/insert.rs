@@ -1,5 +1,8 @@
-//! Delivers the Tamil text to the target app, which still has focus (the
-//! popup never activates): typed as Unicode keystrokes, or pasted.
+//! Sends Tamil mode's output to the focused app: committed words (typed as
+//! Unicode keystrokes, or pasted) and real keys replayed behind them.
+//!
+//! Every event we inject carries `MARK` in `dwExtraInfo`, so our keyboard
+//! hook recognises its own output and lets it through untouched.
 
 use std::time::Duration;
 
@@ -7,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL, HWND};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
@@ -18,24 +21,68 @@ use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_CONTROL,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_CONTROL,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-
+use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use windows::core::{PCWSTR, w};
 
 use crate::config::InsertMode;
 
-pub fn insert(target: HWND, text: &str, mode: InsertMode) -> Result<()> {
-    // SAFETY: plain query.
-    if unsafe { GetForegroundWindow() } != target {
-        bail!("the window you were typing in is no longer active");
+/// Tag on every event we inject ("EZTH").
+pub const MARK: usize = 0x455A_5448;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Out {
+    /// A committed Tamil word (plus its space, if any).
+    Text(String),
+    /// A real key event held back so it lands after earlier output.
+    Key {
+        vk: u16,
+        scan: u16,
+        up: bool,
+        extended: bool,
+    },
+}
+
+/// Sends `items` in order. Returns how many events were injected (each of
+/// them will pass through our hook) and the first error, if any.
+pub fn deliver(items: &[Out], mode: InsertMode) -> (usize, Result<()>) {
+    let mut injected = 0;
+    let mut batch = Vec::new();
+    for item in items {
+        match item {
+            Out::Key {
+                vk,
+                scan,
+                up,
+                extended,
+            } => {
+                let mut flags = KEYBD_EVENT_FLAGS(0);
+                if *up {
+                    flags |= KEYEVENTF_KEYUP;
+                }
+                if *extended {
+                    flags |= KEYEVENTF_EXTENDEDKEY;
+                }
+                batch.push(key(VIRTUAL_KEY(*vk), *scan, flags));
+            }
+            Out::Text(text) => match mode {
+                InsertMode::Unicode => batch.extend(unicode_events(text)),
+                InsertMode::Clipboard => {
+                    // Keys queued before this text must land before the paste.
+                    if let Err(e) = send(&std::mem::take(&mut batch), &mut injected) {
+                        return (injected, Err(e));
+                    }
+                    if let Err(e) = paste(text, &mut injected) {
+                        return (injected, Err(e));
+                    }
+                }
+            },
+        }
     }
-    match mode {
-        InsertMode::Unicode => send_unicode(text),
-        InsertMode::Clipboard => paste(text),
-    }
+    let result = send(&batch, &mut injected);
+    (injected, result)
 }
 
 fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
@@ -47,16 +94,21 @@ fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
                 wScan: scan,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: MARK,
             },
         },
     }
 }
 
-fn send(inputs: &[INPUT]) -> Result<()> {
+/// Injects `inputs`, adding the number actually delivered to `injected`.
+fn send(inputs: &[INPUT], injected: &mut usize) -> Result<()> {
+    if inputs.is_empty() {
+        return Ok(());
+    }
     // SAFETY: `inputs` is a valid slice of INPUT structs.
-    let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
-    if sent as usize != inputs.len() {
+    let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) } as usize;
+    *injected += sent;
+    if sent != inputs.len() {
         bail!("SendInput delivered {sent} of {} events", inputs.len());
     }
     Ok(())
@@ -68,9 +120,9 @@ fn printable(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
-/// One key-down/key-up pair per UTF-16 unit, in a single batch.
-fn send_unicode(text: &str) -> Result<()> {
-    let inputs: Vec<INPUT> = printable(text)
+/// One key-down/key-up pair per UTF-16 unit.
+fn unicode_events(text: &str) -> Vec<INPUT> {
+    printable(text)
         .encode_utf16()
         .flat_map(|u| {
             [
@@ -78,8 +130,7 @@ fn send_unicode(text: &str) -> Result<()> {
                 key(VIRTUAL_KEY(0), u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
             ]
         })
-        .collect();
-    send(&inputs)
+        .collect()
 }
 
 /// Puts `text` on the clipboard, sends Ctrl+V, then puts back what was there.
@@ -87,18 +138,21 @@ fn send_unicode(text: &str) -> Result<()> {
 /// Every memory-backed format is saved and restored, including the privacy
 /// markers password managers set, so their entries keep those markers. The
 /// temporary Tamil text is itself kept out of clipboard history and cloud sync.
-fn paste(text: &str) -> Result<()> {
+fn paste(text: &str, injected: &mut usize) -> Result<()> {
     let saved = Clipboard::open()?.save();
     let mut temp = vec![(CF_UNICODETEXT.0 as u32, utf16_bytes(&printable(text)))];
     temp.extend(private_markers());
     Clipboard::open()?.replace(&temp)?;
     let v = VIRTUAL_KEY(b'V' as u16);
-    send(&[
-        key(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)),
-        key(v, 0, KEYBD_EVENT_FLAGS(0)),
-        key(v, 0, KEYEVENTF_KEYUP),
-        key(VK_CONTROL, 0, KEYEVENTF_KEYUP),
-    ])?;
+    send(
+        &[
+            key(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)),
+            key(v, 0, KEYBD_EVENT_FLAGS(0)),
+            key(v, 0, KEYEVENTF_KEYUP),
+            key(VK_CONTROL, 0, KEYEVENTF_KEYUP),
+        ],
+        injected,
+    )?;
     // Give the target time to read the clipboard before restoring it.
     std::thread::sleep(Duration::from_millis(200));
     Clipboard::open()?.replace(&saved)
@@ -210,26 +264,6 @@ impl Drop for Clipboard {
     fn drop(&mut self) {
         // SAFETY: we opened it in `open`.
         let _ = unsafe { CloseClipboard() };
-    }
-}
-
-/// The clipboard's text, for Ctrl+V into the popup.
-pub fn read_clipboard_text() -> Option<String> {
-    let _clip = Clipboard::open().ok()?;
-    // SAFETY: the clipboard is open; the handle is a NUL-terminated UTF-16
-    // HGLOBAL while CF_UNICODETEXT is available, and is unlocked again.
-    unsafe {
-        IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).ok()?;
-        let h = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
-        let hglobal = HGLOBAL(h.0);
-        let p = GlobalLock(hglobal) as *const u16;
-        if p.is_null() {
-            return None;
-        }
-        let len = (0..).take_while(|&i| *p.add(i) != 0).count();
-        let text = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
-        let _ = GlobalUnlock(hglobal);
-        Some(text)
     }
 }
 

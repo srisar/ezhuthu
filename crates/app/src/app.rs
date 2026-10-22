@@ -1,20 +1,29 @@
 //! App state and the Win32 event handlers.
 //!
-//! Flow: the global hotkey opens the popup over the focused app without
-//! activating it. While it is visible a low-level keyboard hook swallows the
-//! keys and posts them to the popup; the composer turns them into words,
-//! the engine thread transliterates, and Enter types the Tamil phrase into
-//! the still-focused target.
+//! Tamil mode is toggled with the global hotkey. While it is on, a
+//! low-level keyboard hook watches every key:
+//! - a letter starts (or extends) a word; the popup shows its candidates
+//!   at the caret without taking focus;
+//! - Space / Enter / a digit commit the word (Tamil text goes to the app);
+//! - when no word is in progress, everything else passes through, so
+//!   digits, punctuation, Enter, arrows and shortcuts work as usual;
+//! - mid-word, any other key commits the word first, then does its job.
 //!
-//! State lives in a thread-local `RefCell`. Win32 can call back into our
-//! window procedures synchronously, so handlers borrow it briefly through
-//! `with_app` and never hold the borrow across calls that may dispatch
-//! messages to us (a re-entrant call just finds it busy and is skipped).
+//! Ordering: committed text is queued (`outbox`) and injected from the
+//! message loop, tagged with `insert::MARK`. Until every tagged event has
+//! come back through the hook, real keys that would pass are queued behind
+//! it instead, so output can never overtake earlier text.
+//!
+//! State lives in a thread-local `RefCell`. Win32 calls back into our
+//! procedures synchronously, so handlers borrow it briefly through
+//! `with_app` and never hold it across calls that pump messages; a
+//! re-entrant call finds it busy and falls back to a safe default.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ezhuthu_xlit::Transliterator;
@@ -31,9 +40,9 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HHOOK,
-    HWND_TOPMOST, KBDLLHOOKSTRUCT, MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassExW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MA_NOACTIVATE, MSG, PostMessageW,
+    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNORMAL,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
     UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
     WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEACTIVATE, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_USER, WNDCLASSEXW,
@@ -45,22 +54,24 @@ use crate::compose::Composer;
 use crate::config::{Config, InsertMode};
 use crate::engine::{Engine, Event};
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
-use crate::insert;
+use crate::insert::{self, Out};
 use crate::popup::{Popup, View};
-use crate::tray::Tray;
+use crate::tray::{self, Tray};
 use crate::win::{error_box, instance, wide};
 
 const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_ENGINE: u32 = WM_APP + 2;
-/// Popup key: wparam = virtual key | CTRL_BIT, lparam = typed char (0 = none).
-const WM_APP_KEY: u32 = WM_APP + 3;
-const WM_APP_CANCEL: u32 = WM_APP + 4;
-const CTRL_BIT: usize = 1 << 16;
+const WM_APP_TOGGLE: u32 = WM_APP + 3;
+const WM_APP_FLUSH: u32 = WM_APP + 4;
+const WM_APP_FOREGROUND: u32 = WM_APP + 5;
 const NIN_SELECT: u32 = WM_USER;
 const HOTKEY_ID: i32 = 1;
 const MAX_ROWS: usize = 9;
+/// Give up waiting for our injected events after this long (e.g. UIPI
+/// silently dropped them), so real keys are never held back for good.
+const IN_FLIGHT_TIMEOUT: Duration = Duration::from_millis(500);
 
-const HINT: &str = "↑↓ or 1–5 choose · Space next word · Enter insert · Esc cancel";
+const HINT: &str = "↑↓ or 1–5 choose · Space / Enter insert · Esc discard";
 
 enum Status {
     Loading,
@@ -74,30 +85,32 @@ struct App {
     tray: Tray,
     config: Config,
     config_path: PathBuf,
+    hotkey: Option<Hotkey>,
     engine: Engine,
     xlit: Option<Arc<Transliterator>>,
     status: Status,
     cache: HashMap<String, Vec<String>>,
     pending: HashSet<String>,
-    composer: Composer,
-    target: HWND,
-    visible: bool,
+    /// Tamil mode: the keyboard hook is installed.
+    on: bool,
     kb_hook: Option<HHOOK>,
     fg_hook: Option<HWINEVENTHOOK>,
+    composer: Composer,
+    visible: bool,
+    /// Keys whose key-down we swallowed; their key-up is swallowed too.
+    swallowed: HashSet<u16>,
+    /// Output waiting to be injected, in order.
+    outbox: Vec<Out>,
+    flush_posted: bool,
+    /// Our injected events that haven't come back through the hook yet.
+    in_flight: usize,
+    in_flight_since: Instant,
     /// One-off message shown in the hint line until the next key.
     flash: Option<String>,
 }
 
-/// What the keyboard hook needs, readable without borrowing the app.
-#[derive(Clone, Copy)]
-struct HookState {
-    popup: HWND,
-    hotkey: Option<Hotkey>,
-}
-
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
-    static HOOK: Cell<Option<HookState>> = const { Cell::new(None) };
     static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
 }
 
@@ -106,6 +119,11 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
         Ok(mut app) => app.as_mut().map(f),
         Err(_) => None,
     })
+}
+
+fn post(hwnd: HWND, msg: u32) {
+    // SAFETY: posting to our own window.
+    let _ = unsafe { PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0)) };
 }
 
 // ---------------------------------------------------------------- startup
@@ -118,9 +136,8 @@ pub fn run() -> Result<()> {
     };
 
     let main = create_main_window()?;
-    let rows = config.beam.min(MAX_ROWS);
-    let popup = Popup::create(Some(popup_proc), rows)?;
-    let tray = Tray::add(main, WM_APP_TRAY, &tooltip(&config))?;
+    let popup = Popup::create(Some(popup_proc), config.beam.min(MAX_ROWS))?;
+    let tray = Tray::add(main, WM_APP_TRAY, &tooltip(&config, false))?;
     // SAFETY: the string is a valid NUL-terminated literal.
     TASKBAR_CREATED.set(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) });
 
@@ -131,16 +148,22 @@ pub fn run() -> Result<()> {
         tray,
         config,
         config_path,
+        hotkey: None,
         engine,
         xlit: None,
         status: Status::Loading,
         cache: HashMap::new(),
         pending: HashSet::new(),
-        composer: Composer::default(),
-        target: HWND::default(),
-        visible: false,
+        on: false,
         kb_hook: None,
         fg_hook: None,
+        composer: Composer::default(),
+        visible: false,
+        swallowed: HashSet::new(),
+        outbox: Vec::new(),
+        flush_posted: false,
+        in_flight: 0,
+        in_flight_since: Instant::now(),
         flash: None,
     };
     if let Some(e) = config_error {
@@ -162,14 +185,19 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn tooltip(config: &Config) -> String {
-    format!("ezhuthu: Tamil input ({})", config.hotkey)
+fn tooltip(config: &Config, on: bool) -> String {
+    let state = if on {
+        "Tamil mode ON"
+    } else {
+        "Tamil mode off"
+    };
+    format!("ezhuthu: {state} ({} to toggle)", config.hotkey)
 }
 
 fn create_main_window() -> Result<HWND> {
     let class = w!("ezhuthu.main");
     // SAFETY: the class struct is fully initialised. The window is never
-    // shown; it receives the hotkey, tray and engine messages.
+    // shown; it receives the hotkey, tray, engine and flush messages.
     unsafe {
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -196,16 +224,28 @@ fn create_main_window() -> Result<HWND> {
     }
 }
 
+// ---------------------------------------------------------------- app logic
+
+/// A key event as seen by the low-level hook.
+#[derive(Clone, Copy)]
+struct KeyEvent {
+    vk: u16,
+    scan: u32,
+    down: bool,
+    extended: bool,
+    ours: bool,
+}
+
 impl App {
     fn register_hotkey(&mut self) {
         // SAFETY: unregistering an id that isn't registered is harmless.
         let _ = unsafe { UnregisterHotKey(Some(self.main), HOTKEY_ID) };
+        self.hotkey = None;
         let hotkey = match Hotkey::parse(&self.config.hotkey) {
             Ok(h) => h,
             Err(e) => {
                 self.tray
                     .notify("Invalid hotkey in settings", &format!("{e:#}"), true);
-                HOOK.set(None);
                 return;
             }
         };
@@ -223,18 +263,112 @@ impl App {
                 true,
             );
         }
-        HOOK.set(Some(HookState {
-            popup: self.popup.hwnd,
-            hotkey: Some(hotkey),
-        }));
+        self.hotkey = Some(hotkey);
     }
 
-    fn show(&mut self, anchor: caret::Anchor) {
+    fn set_mode(&mut self, on: bool) {
+        if on == self.on {
+            return;
+        }
+        self.on = on;
+        // Events still on their way back would never be counted once the
+        // hook is gone; start each mode change with a clean slate.
+        self.in_flight = 0;
+        if on {
+            // SAFETY: installing our own hooks; removed in the `else` branch.
+            unsafe {
+                self.kb_hook =
+                    SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), Some(instance()), 0)
+                        .ok();
+                self.fg_hook = Some(SetWinEventHook(
+                    EVENT_SYSTEM_FOREGROUND,
+                    EVENT_SYSTEM_FOREGROUND,
+                    None,
+                    Some(foreground_changed),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                ));
+            }
+            if self.kb_hook.is_none() {
+                self.on = false;
+                self.tray.notify(
+                    "Couldn't start Tamil mode",
+                    "Windows refused the keyboard hook.",
+                    true,
+                );
+            } else if let Status::Failed(e) = &self.status {
+                let e = e.clone();
+                self.tray.notify("The model isn't loaded", &e, true);
+            }
+            // SAFETY: plain query.
+            let fg = unsafe { GetForegroundWindow() };
+            if !fg.0.is_null() && insert::blocked_by_uipi(fg) {
+                self.tray.notify(
+                    "This window runs as administrator",
+                    "Windows blocks Tamil typing into it; other windows work.",
+                    true,
+                );
+            }
+        } else {
+            self.discard();
+            // SAFETY: unhooking our own hooks.
+            unsafe {
+                if let Some(h) = self.kb_hook.take() {
+                    let _ = UnhookWindowsHookEx(h);
+                }
+                if let Some(h) = self.fg_hook.take() {
+                    let _ = UnhookWinEvent(h);
+                }
+            }
+            self.swallowed.clear();
+        }
+        let tip = tooltip(&self.config, self.on);
+        self.tray.set_state(self.on, &tip);
+    }
+
+    fn candidates(&self) -> &[String] {
+        self.composer
+            .key()
+            .and_then(|k| self.cache.get(&k))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn rows(&self) -> usize {
+        self.popup.rows()
+    }
+
+    /// Requests the current word from the engine unless cached or pending.
+    fn request(&mut self) {
+        if let Some(key) = self.composer.key()
+            && !self.cache.contains_key(&key)
+            && self.pending.insert(key.clone())
+        {
+            self.engine.request(key);
+        }
+    }
+
+    fn after_edit(&mut self) {
+        if self.composer.is_empty() {
+            self.hide_popup();
+        } else {
+            self.request();
+            self.invalidate();
+        }
+    }
+
+    /// First letter of a word: open the popup at the caret.
+    fn start_word(&mut self, c: char) {
+        // SAFETY: plain query.
+        let anchor = caret::find(unsafe { GetForegroundWindow() });
+        self.composer.clear();
+        self.composer.push(c);
+        self.request();
         self.popup.set_dpi(caret::dpi_at(anchor));
         let (w, h) = self.popup.size();
         let (x, y) = caret::place(anchor, w, h, self.popup.gap());
         self.visible = true;
-        // SAFETY: our own window; SWP_NOACTIVATE keeps focus in the target.
+        // SAFETY: our own window; SWP_NOACTIVATE keeps focus in the app.
         unsafe {
             let _ = SetWindowPos(
                 self.popup.hwnd,
@@ -245,38 +379,16 @@ impl App {
                 h,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
-            let _ = InvalidateRect(Some(self.popup.hwnd), None, false);
-            self.kb_hook =
-                SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), Some(instance()), 0).ok();
-            self.fg_hook = Some(SetWinEventHook(
-                EVENT_SYSTEM_FOREGROUND,
-                EVENT_SYSTEM_FOREGROUND,
-                None,
-                Some(foreground_changed),
-                0,
-                0,
-                WINEVENT_OUTOFCONTEXT,
-            ));
         }
-        if self.kb_hook.is_none() {
-            self.flash = Some("Could not capture the keyboard; try again".into());
-        }
+        self.invalidate();
     }
 
-    fn hide(&mut self) {
-        self.visible = false;
-        // SAFETY: unhooking our own hooks and hiding our own window.
-        unsafe {
-            if let Some(h) = self.kb_hook.take() {
-                let _ = UnhookWindowsHookEx(h);
-            }
-            if let Some(h) = self.fg_hook.take() {
-                let _ = UnhookWinEvent(h);
-            }
-            let _ = ShowWindow(self.popup.hwnd, SW_HIDE);
+    fn hide_popup(&mut self) {
+        if self.visible {
+            self.visible = false;
+            // SAFETY: hiding our own window.
+            let _ = unsafe { ShowWindow(self.popup.hwnd, SW_HIDE) };
         }
-        self.composer.clear();
-        self.flash = None;
     }
 
     fn invalidate(&self) {
@@ -286,37 +398,179 @@ impl App {
         }
     }
 
-    fn current_candidates(&self) -> &[String] {
-        self.composer
-            .current_key()
-            .and_then(|k| self.cache.get(&k))
-            .map_or(&[], Vec::as_slice)
+    fn discard(&mut self) {
+        self.composer.clear();
+        self.flash = None;
+        self.hide_popup();
     }
 
-    /// Asks the engine for every word not cached or already pending.
-    fn request_missing(&mut self) {
-        for key in self.composer.keys() {
-            if !self.cache.contains_key(&key) && self.pending.insert(key.clone()) {
-                self.engine.request(key);
-            }
+    /// Commits the current word with its selected candidate plus `suffix`.
+    fn commit(&mut self, suffix: &str) {
+        if self.composer.is_empty() {
+            return;
+        }
+        // Space pressed before the engine answered: finish it here (~40 ms).
+        if let (Some(key), Some(xlit)) = (self.composer.key(), &self.xlit)
+            && !self.cache.contains_key(&key)
+        {
+            let cands = xlit
+                .transliterate(&key)
+                .map(|c| c.into_iter().map(|c| c.text).collect())
+                .unwrap_or_default();
+            self.cache.insert(key, cands);
+        }
+        let text = self.composer.render(Some(self.candidates())) + suffix;
+        self.discard();
+        self.emit(Out::Text(text));
+    }
+
+    fn pick(&mut self, index: usize) -> bool {
+        if index >= self.candidates().len().min(self.rows()) {
+            return false;
+        }
+        self.composer.select(index);
+        self.commit(" ");
+        true
+    }
+
+    fn emit(&mut self, out: Out) {
+        self.outbox.push(out);
+        if !self.flush_posted && !self.waiting() {
+            self.flush_posted = true;
+            post(self.main, WM_APP_FLUSH);
         }
     }
 
-    fn set_text(&mut self, text: &str) {
-        self.composer.set_text(text);
-        self.request_missing();
+    /// True while injected events are still travelling back through the hook.
+    fn waiting(&mut self) -> bool {
+        if self.in_flight > 0 && self.in_flight_since.elapsed() > IN_FLIGHT_TIMEOUT {
+            self.in_flight = 0;
+        }
+        self.in_flight > 0
     }
 
-    fn push(&mut self, s: &str) {
-        let text = format!("{}{s}", self.composer.text());
-        self.set_text(&text);
+    /// The hook's verdict for one key event: true = swallow it.
+    fn on_hook(&mut self, ev: KeyEvent) -> bool {
+        if ev.ours {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            if self.in_flight == 0 && !self.outbox.is_empty() && !self.flush_posted {
+                self.flush_posted = true;
+                post(self.main, WM_APP_FLUSH);
+            }
+            return false;
+        }
+        if !self.on || is_modifier(ev.vk) {
+            return false;
+        }
+        let swallow = if ev.down {
+            let s = self.on_key_down(ev);
+            if s {
+                self.swallowed.insert(ev.vk);
+            }
+            s
+        } else {
+            self.swallowed.remove(&ev.vk)
+        };
+        if swallow {
+            return true;
+        }
+        // Passing through: keep it behind any output we haven't delivered.
+        if !self.outbox.is_empty() || self.waiting() {
+            self.emit(Out::Key {
+                vk: ev.vk,
+                scan: ev.scan as u16,
+                up: !ev.down,
+                extended: ev.extended,
+            });
+            return true;
+        }
+        false
+    }
+
+    fn on_key_down(&mut self, ev: KeyEvent) -> bool {
+        let (ctrl, alt, shift) = (down(VK_CONTROL.0), down(VK_MENU.0), down(VK_SHIFT.0));
+        let win = down(VK_LWIN.0) || down(VK_RWIN.0);
+        if let Some(h) = self.hotkey {
+            let mods = (ctrl as u32 * MOD_CONTROL)
+                | (alt as u32 * MOD_ALT)
+                | (shift as u32 * MOD_SHIFT)
+                | (win as u32 * MOD_WIN);
+            if ev.vk as u32 == h.vk && mods == h.modifiers {
+                post(self.main, WM_APP_TOGGLE);
+                return true;
+            }
+        }
+        let composing = !self.composer.is_empty();
+        self.flash = None;
+        if alt || win {
+            // Alt+Tab, Win+D and friends: drop the word, let the key through.
+            self.discard();
+            return false;
+        }
+        if ctrl {
+            if !composing {
+                return false;
+            }
+            match ev.vk {
+                v if v == VK_BACK.0 => self.discard(),
+                v if v == b'R' as u16 => {
+                    self.flash = Some("Refine (Ctrl+R) is not available yet".into());
+                    self.invalidate();
+                }
+                // Ctrl+S, Ctrl+V…: insert the word, then let the shortcut act.
+                _ => {
+                    self.commit("");
+                    return false;
+                }
+            }
+            return true;
+        }
+        match ev.vk {
+            v if v == VK_ESCAPE.0 && composing => self.discard(),
+            v if v == VK_RETURN.0 && composing => self.commit(""),
+            v if v == VK_SPACE.0 && composing => self.commit(" "),
+            v if v == VK_BACK.0 && composing => {
+                self.composer.pop();
+                self.after_edit();
+            }
+            v if (v == VK_UP.0 || v == VK_DOWN.0) && composing => {
+                let n = self.candidates().len().min(self.rows());
+                self.composer
+                    .move_selection(if v == VK_UP.0 { -1 } else { 1 }, n);
+                self.invalidate();
+            }
+            _ => {
+                // Control characters (Tab, Esc, Enter…) count as "not text".
+                let ch = key_char(ev.vk as u32, ev.scan).filter(|c| !c.is_control());
+                match (composing, ch) {
+                    (true, Some(c)) => {
+                        let picked = c
+                            .to_digit(10)
+                            .filter(|&d| d >= 1)
+                            .is_some_and(|d| self.pick(d as usize - 1));
+                        if !picked {
+                            self.composer.push(c);
+                            self.after_edit();
+                        }
+                    }
+                    (false, Some(c)) if c.is_ascii_alphabetic() => self.start_word(c),
+                    // Mid-word Tab, arrows, Delete…: insert the word, then the key.
+                    (true, None) => {
+                        self.commit("");
+                        return false;
+                    }
+                    (false, _) => return false,
+                }
+            }
+        }
+        true
     }
 
     fn view(&self) -> View {
         let candidates: Vec<String> = self
-            .current_candidates()
+            .candidates()
             .iter()
-            .take(self.popup.rows())
+            .take(self.rows())
             .cloned()
             .collect();
         let (hint, warn) = if let Some(f) = &self.flash {
@@ -325,146 +579,56 @@ impl App {
             match &self.status {
                 Status::Loading => ("Loading the model…".to_string(), false),
                 Status::Failed(e) => (format!("Model failed to load: {e}"), true),
-                Status::Ready => (
-                    HINT.replace("1–5", &format!("1–{}", self.popup.rows())),
-                    false,
-                ),
+                Status::Ready => (HINT.replace("1–5", &format!("1–{}", self.rows())), false),
             }
         };
         View {
             input: self.composer.text().to_string(),
-            preview: self
-                .composer
-                .render(|k| self.cache.get(k).map(Vec::as_slice)),
+            preview: self.composer.render(Some(self.candidates())),
             candidates,
             selected: self.composer.selected(),
             hint,
             warn,
         }
     }
-
-    /// Picks candidate `index` for the current word and starts the next one.
-    fn pick(&mut self, index: usize) -> bool {
-        let cands = self.current_candidates().to_vec();
-        if index >= cands.len() {
-            return false;
-        }
-        self.composer.select(index);
-        self.composer.commit_current(Some(&cands));
-        self.push(" ");
-        true
-    }
-
-    fn handle_key(&mut self, vk: u16, ctrl: bool, ch: Option<char>) -> Option<Action> {
-        self.flash = None;
-        match vk {
-            v if v == VK_ESCAPE.0 => return Some(Action::Cancel),
-            v if v == VK_RETURN.0 => return Some(Action::Accept),
-            v if ctrl && v == b'V' as u16 => return Some(Action::Paste),
-            v if ctrl && v == b'R' as u16 => {
-                self.flash = Some("Refine (Ctrl+R) is not available yet".into());
-            }
-            v if v == VK_BACK.0 => {
-                let mut text = self.composer.text().to_string();
-                if ctrl {
-                    let trimmed = text.trim_end_matches(' ').len();
-                    text.truncate(trimmed);
-                    let start = text.rfind(' ').map_or(0, |i| i + 1);
-                    text.truncate(start);
-                } else {
-                    text.pop();
-                }
-                self.set_text(&text);
-            }
-            v if v == VK_UP.0 || v == VK_DOWN.0 => {
-                let n = self.current_candidates().len().min(self.popup.rows());
-                self.composer
-                    .move_selection(if v == VK_UP.0 { -1 } else { 1 }, n);
-            }
-            v if v == VK_SPACE.0 => {
-                let cands = self.current_candidates().to_vec();
-                self.composer.commit_current(Some(&cands));
-                self.push(" ");
-            }
-            _ => {
-                let c = ch?;
-                let picked = c
-                    .to_digit(10)
-                    .filter(|&d| (1..=self.popup.rows() as u32).contains(&d))
-                    .is_some_and(|d| self.pick(d as usize - 1));
-                if !picked && !c.is_control() {
-                    self.push(&c.to_string());
-                }
-            }
-        }
-        None
-    }
-
-    fn render(&self) -> String {
-        self.composer
-            .render(|k| self.cache.get(k).map(Vec::as_slice))
-    }
-}
-
-enum Action {
-    Accept,
-    Cancel,
-    Paste,
 }
 
 // ---------------------------------------------------------------- handlers
 
-fn on_hotkey() {
-    // SAFETY: plain query.
-    let fg = unsafe { GetForegroundWindow() };
-    let Some((visible, popup)) = with_app(|a| (a.visible, a.popup.hwnd)) else {
-        return;
-    };
-    if visible {
-        cancel();
-        return;
-    }
-    if fg.0.is_null() || fg == popup {
-        return;
-    }
-    if insert::blocked_by_uipi(fg) {
-        with_app(|a| {
-            a.tray.notify(
-                "Can't type into this window",
-                "It runs as administrator, and Windows blocks input from normal apps into it.",
-                true,
-            )
-        });
-        return;
-    }
-    let anchor = caret::find(fg);
+fn toggle() {
     with_app(|a| {
-        a.target = fg;
-        a.composer.clear();
-        a.flash = None;
-        a.show(anchor);
+        let on = !a.on;
+        a.set_mode(on);
     });
 }
 
-fn on_key(wparam: usize, lparam: isize) {
-    let vk = (wparam & 0xFFFF) as u16;
-    let ctrl = wparam & CTRL_BIT != 0;
-    let ch = char::from_u32(lparam as u32).filter(|&c| c != '\0');
-    let action = with_app(|a| a.handle_key(vk, ctrl, ch)).flatten();
-    match action {
-        Some(Action::Accept) => accept(),
-        Some(Action::Cancel) => cancel(),
-        Some(Action::Paste) => {
-            let text = insert::read_clipboard_text().unwrap_or_default();
-            let clean: String = text
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect();
-            with_app(|a| a.push(&clean));
+/// Injects queued output. Runs from the message loop, never inside the hook.
+fn flush() {
+    let job = with_app(|a| {
+        a.flush_posted = false;
+        if a.waiting() || a.outbox.is_empty() {
+            return None;
         }
-        None => {}
-    }
-    with_app(|a| a.invalidate());
+        Some((std::mem::take(&mut a.outbox), a.config.insert_mode))
+    })
+    .flatten();
+    let Some((items, mode)) = job else { return };
+    let (injected, result) = insert::deliver(&items, mode);
+    with_app(|a| {
+        if injected > 0 {
+            a.in_flight += injected;
+            a.in_flight_since = Instant::now();
+        }
+        if let Err(e) = result {
+            let hint = if mode == InsertMode::Unicode {
+                "\nIf this app mishandles typed text, set insert_mode = \"clipboard\" in the settings."
+            } else {
+                ""
+            };
+            a.tray
+                .notify("Couldn't insert the text", &format!("{e:#}{hint}"), true);
+        }
+    });
 }
 
 fn on_engine_events() {
@@ -506,77 +670,6 @@ fn on_engine_events() {
     }
 }
 
-/// Enter: finish any words still being transliterated, then type the phrase.
-fn accept() {
-    enum Prep {
-        Empty,
-        NotLoaded,
-        Run(Option<Arc<Transliterator>>, Vec<String>),
-    }
-    let Some(prep) = with_app(|a| {
-        if a.composer.text().trim().is_empty() {
-            return Prep::Empty;
-        }
-        let missing: Vec<String> = a
-            .composer
-            .keys()
-            .into_iter()
-            .filter(|k| !a.cache.contains_key(k))
-            .collect();
-        match (&a.xlit, missing.is_empty()) {
-            (_, true) => Prep::Run(None, missing),
-            (Some(x), false) => Prep::Run(Some(x.clone()), missing),
-            (None, false) => Prep::NotLoaded,
-        }
-    }) else {
-        return;
-    };
-    match prep {
-        Prep::Empty => return cancel(),
-        Prep::NotLoaded => {
-            with_app(|a| {
-                a.flash = Some("The model is still loading; try Enter again in a moment".into());
-                a.invalidate();
-            });
-            return;
-        }
-        Prep::Run(Some(xlit), missing) => {
-            // Rare: Enter pressed before the engine answered. Takes ~40 ms/word.
-            let results: Vec<(String, Vec<String>)> = missing
-                .into_iter()
-                .map(|k| {
-                    let c = xlit
-                        .transliterate(&k)
-                        .map(|c| c.into_iter().map(|c| c.text).collect());
-                    (k, c.unwrap_or_default())
-                })
-                .collect();
-            with_app(|a| a.cache.extend(results));
-        }
-        Prep::Run(None, _) => {}
-    }
-    let Some((text, target, mode)) = with_app(|a| (a.render(), a.target, a.config.insert_mode))
-    else {
-        return;
-    };
-    with_app(|a| a.hide());
-    if let Err(e) = insert::insert(target, &text, mode) {
-        let hint = if mode == InsertMode::Unicode {
-            "\nIf this app mishandles typed text, set insert_mode = \"clipboard\" in the settings."
-        } else {
-            ""
-        };
-        with_app(|a| {
-            a.tray
-                .notify("Couldn't insert the text", &format!("{e:#}{hint}"), true)
-        });
-    }
-}
-
-fn cancel() {
-    with_app(|a| a.hide());
-}
-
 fn on_tray(event: u32) {
     if !matches!(
         event,
@@ -584,23 +677,37 @@ fn on_tray(event: u32) {
     ) {
         return;
     }
-    let Some((header, path)) = with_app(|a| (tooltip(&a.config), a.config_path.clone())) else {
+    let Some((main, on, header, path)) = with_app(|a| {
+        (
+            a.main,
+            a.on,
+            tooltip(&a.config, a.on),
+            a.config_path.clone(),
+        )
+    }) else {
         return;
     };
-    const SETTINGS: usize = 1;
-    const RELOAD: usize = 2;
-    const QUIT: usize = 3;
+    const TOGGLE: usize = 1;
+    const SETTINGS: usize = 2;
+    const RELOAD: usize = 3;
+    const QUIT: usize = 4;
+    let toggle_label = if on {
+        "Turn Tamil mode off"
+    } else {
+        "Turn Tamil mode on"
+    };
     let items = [
         (0, header.as_str()),
         (0, "-"),
+        (TOGGLE, toggle_label),
         (SETTINGS, "Open settings file"),
         (RELOAD, "Reload settings"),
         (0, "-"),
         (QUIT, "Quit"),
     ];
-    // The menu runs a modal loop, so the app must not be borrowed meanwhile.
-    let tray_menu = with_app(|a| a.tray.menu(&items));
-    match tray_menu.unwrap_or(0) {
+    // Modal loop: the app state must not be borrowed meanwhile.
+    match tray::menu(main, &items) {
+        TOGGLE => toggle(),
         SETTINGS => open_in_notepad(&path),
         RELOAD => reload_settings(),
         QUIT => quit(),
@@ -636,8 +743,8 @@ fn reload_settings() {
         let restart = new.assets_dir != a.config.assets_dir || new.beam != a.config.beam;
         a.config = new;
         a.register_hotkey();
-        let tip = tooltip(&a.config);
-        a.tray.set_tip(&tip);
+        let tip = tooltip(&a.config, a.on);
+        a.tray.set_state(a.on, &tip);
         let note = if restart {
             "Restart ezhuthu to apply the model settings (beam, assets_dir)."
         } else {
@@ -649,7 +756,7 @@ fn reload_settings() {
 
 fn quit() {
     let main = with_app(|a| {
-        a.hide();
+        a.set_mode(false);
         a.tray.remove();
         // SAFETY: our registration.
         let _ = unsafe { UnregisterHotKey(Some(a.main), HOTKEY_ID) };
@@ -670,10 +777,14 @@ unsafe extern "system" fn main_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => on_hotkey(),
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => toggle(),
+        WM_APP_TOGGLE => toggle(),
+        WM_APP_FLUSH => flush(),
         WM_APP_TRAY => on_tray((lparam.0 & 0xFFFF) as u32),
         WM_APP_ENGINE => on_engine_events(),
-        WM_APP_CANCEL => cancel(),
+        WM_APP_FOREGROUND => {
+            with_app(|a| a.discard());
+        }
         WM_DESTROY => {
             // SAFETY: ends our message loop.
             unsafe { PostQuitMessage(0) };
@@ -698,7 +809,7 @@ unsafe extern "system" fn popup_proc(
     match msg {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_ERASEBKGND => return LRESULT(1),
-        WM_DPICHANGED => {} // sized explicitly on each show
+        WM_DPICHANGED => {} // sized explicitly each time a word starts
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             // SAFETY: Begin/EndPaint pair on our own window.
@@ -709,19 +820,14 @@ unsafe extern "system" fn popup_proc(
             }
         }
         WM_LBUTTONDOWN => {
-            let (x, y) = (
-                (lparam.0 & 0xFFFF) as i16 as i32,
-                ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
-            );
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             with_app(|a| {
                 if let Some(row) = a.popup.row_at(x, y) {
                     a.pick(row);
-                    a.invalidate();
                 }
             });
         }
-        WM_APP_KEY => on_key(wparam.0, lparam.0),
-        WM_APP_CANCEL => cancel(),
         // SAFETY: default processing for everything else.
         _ => return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
@@ -775,86 +881,27 @@ fn key_char(vk: u32, scan: u32) -> Option<char> {
     }
 }
 
-enum HookAction {
-    Pass,
-    Swallow,
-    Post(usize, isize),
-    Cancel,
-}
-
-/// Decides what to do with a key while the popup is visible.
-fn classify(state: HookState, vk: u16, scan: u32, is_down: bool) -> HookAction {
-    if is_modifier(vk) {
-        return HookAction::Pass;
-    }
-    let (ctrl, alt, win, shift) = (
-        down(VK_CONTROL.0),
-        down(VK_MENU.0),
-        down(VK_LWIN.0) || down(VK_RWIN.0),
-        down(VK_SHIFT.0),
-    );
-    if let Some(h) = state.hotkey {
-        let mods = (ctrl as u32 * MOD_CONTROL)
-            | (alt as u32 * MOD_ALT)
-            | (shift as u32 * MOD_SHIFT)
-            | (win as u32 * MOD_WIN);
-        if vk as u32 == h.vk && mods == h.modifiers {
-            return if is_down {
-                HookAction::Cancel
-            } else {
-                HookAction::Swallow
-            };
-        }
-    }
-    if alt || win {
-        // Alt+Tab, Win+D and friends: get out of the way.
-        return HookAction::Cancel;
-    }
-    if ctrl && ![b'V' as u16, b'R' as u16, VK_BACK.0].contains(&vk) {
-        return HookAction::Cancel;
-    }
-    if !is_down {
-        return HookAction::Swallow;
-    }
-    let ch = if ctrl {
-        None
-    } else {
-        key_char(vk as u32, scan)
-    };
-    let wparam = vk as usize | if ctrl { CTRL_BIT } else { 0 };
-    HookAction::Post(wparam, ch.map_or(0, |c| c as isize))
-}
-
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    // Injected keys (remappers, on-screen keyboards) are handled too; our own
-    // SendInput only runs after this hook has been removed.
-    if code >= 0
-        && let Some(state) = HOOK.get()
-    {
+    if code >= 0 {
         // SAFETY: for WH_KEYBOARD_LL with code >= 0, lparam points to a KBDLLHOOKSTRUCT.
         let kb = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        let is_down = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
-        match classify(state, kb.vkCode as u16, kb.scanCode, is_down) {
-            HookAction::Pass => {}
-            HookAction::Swallow => return LRESULT(1),
-            HookAction::Post(w, l) => {
-                // SAFETY: posting to our own window.
-                let _ =
-                    unsafe { PostMessageW(Some(state.popup), WM_APP_KEY, WPARAM(w), LPARAM(l)) };
-                return LRESULT(1);
-            }
-            HookAction::Cancel => {
-                // SAFETY: posting to our own window; the key passes through.
-                let _ =
-                    unsafe { PostMessageW(Some(state.popup), WM_APP_CANCEL, WPARAM(0), LPARAM(0)) };
-            }
+        let ev = KeyEvent {
+            vk: kb.vkCode as u16,
+            scan: kb.scanCode,
+            down: wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN,
+            extended: kb.flags & LLKHF_EXTENDED == LLKHF_EXTENDED,
+            ours: kb.dwExtraInfo == insert::MARK,
+        };
+        // If the state is busy (re-entrant call), let the key through.
+        if with_app(|a| a.on_hook(ev)) == Some(true) {
+            return LRESULT(1);
         }
     }
     // SAFETY: forwarding to the rest of the hook chain.
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// Another window came to the foreground (click, Alt+Tab): close the popup.
+/// Another window came to the foreground (click, Alt+Tab): drop the word.
 unsafe extern "system" fn foreground_changed(
     _hook: HWINEVENTHOOK,
     _event: u32,
@@ -864,11 +911,9 @@ unsafe extern "system" fn foreground_changed(
     _thread: u32,
     _time: u32,
 ) {
-    let main =
-        with_app(|a| (a.visible && hwnd != a.target && hwnd != a.popup.hwnd).then_some(a.main));
+    let main = with_app(|a| (!a.composer.is_empty() && hwnd != a.popup.hwnd).then_some(a.main));
     if let Some(Some(main)) = main {
-        // SAFETY: posting to our own window.
-        let _ = unsafe { PostMessageW(Some(main), WM_APP_CANCEL, WPARAM(0), LPARAM(0)) };
+        post(main, WM_APP_FOREGROUND);
     }
 }
 
