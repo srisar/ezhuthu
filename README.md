@@ -69,7 +69,22 @@ diff work/fairseq_out.txt work/ref_out.txt && echo identical
 
 ## Assets
 
-Model files are never committed. `assets/` is gitignored, and a `tools/fetch-assets` script will download the exported files from a GitHub Release (coming in a later phase).
+Model files are never committed. `assets/` is gitignored. To get the files, run:
+
+```bash
+tools/fetch-assets.sh
+```
+
+This downloads the `assets-v1` GitHub Release (about 58 MB) with `gh` and verifies it against `tools/assets.sha256`. You need `gh auth login` while the repository is private. [assets/README.md](assets/README.md) lists the files.
+
+To rebuild the word-frequency dictionary from upstream, run these from `tools/export`. `fetch` downloads only the 105 MB Tamil entry of the 850 MB zip.
+
+```bash
+uv run python word_freq.py fetch
+uv run python word_freq.py build --top 500000
+```
+
+If you rebuild any asset, update `tools/assets.sha256` and publish a new release tag.
 
 ## Model source and license
 

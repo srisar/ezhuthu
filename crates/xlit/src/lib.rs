@@ -1,11 +1,13 @@
 //! IndicXlit Roman→Tamil transliteration on tract (pure Rust ONNX).
 //!
 //! Assets come from `tools/export/export_onnx.py`: `xlit_encoder.onnx`,
-//! `xlit_decoder.onnx`, `vocab_src.json`, `vocab_tgt.json`.
+//! `xlit_decoder.onnx`, `vocab_src.json`, `vocab_tgt.json`, plus the
+//! optional `ta_word_freq.bin` from `tools/export/word_freq.py`.
 
 mod beam;
 mod rescore;
 mod vocab;
+mod word_freq;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -16,8 +18,10 @@ use tract_onnx::prelude::*;
 pub use beam::{Hypo, MAX_LEN};
 pub use rescore::{ALPHA as RESCORE_ALPHA, WordProb, rescore};
 pub use vocab::Vocab;
+pub use word_freq::WordFreq;
 
 pub const DEFAULT_BEAM: usize = 5;
+pub const WORD_FREQ_FILE: &str = "ta_word_freq.bin";
 const TARGET_LANG: &str = "ta";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,15 +40,23 @@ pub struct Transliterator {
     tgt: Vocab,
     lang_tok: u32,
     beam: usize,
+    word_freq: Option<WordFreq>,
 }
 
 impl Transliterator {
+    /// Loads the model; `ta_word_freq.bin` is used for rescoring when present.
     pub fn load(assets: &Path) -> Result<Self> {
         let src = Vocab::load(&assets.join("vocab_src.json"))?;
         let tgt = Vocab::load(&assets.join("vocab_tgt.json"))?;
         let lang_tok = src
             .lang_token(TARGET_LANG)
             .context("vocab_src.json has no __ta__ token")?;
+        let freq_path = assets.join(WORD_FREQ_FILE);
+        let word_freq = if freq_path.exists() {
+            Some(WordFreq::load(&freq_path)?)
+        } else {
+            None
+        };
         Ok(Self {
             encoder: load_plan(&assets.join("xlit_encoder.onnx"))?,
             decoder: load_plan(&assets.join("xlit_decoder.onnx"))?,
@@ -52,7 +64,19 @@ impl Transliterator {
             tgt,
             lang_tok,
             beam: DEFAULT_BEAM,
+            word_freq,
         })
+    }
+
+    /// Whether `ta_word_freq.bin` was found, so `transliterate` rescores.
+    pub fn has_word_freq(&self) -> bool {
+        self.word_freq.is_some()
+    }
+
+    /// Drops the word-frequency dictionary (raw beam order from then on).
+    pub fn without_word_freq(mut self) -> Self {
+        self.word_freq = None;
+        self
     }
 
     pub fn with_beam(mut self, beam: usize) -> Self {
@@ -75,8 +99,22 @@ impl Transliterator {
         Some(ids)
     }
 
-    /// Top-`beam` Tamil candidates for one romanized word, best first.
+    /// Top-`beam` Tamil candidates for one romanized word, best first:
+    /// beam search, then word-frequency rescoring if the dictionary loaded
+    /// (as the official engine does). `score` stays the beam score.
     pub fn transliterate(&self, word: &str) -> Result<Vec<Candidate>> {
+        let cands = self.transliterate_raw(word)?;
+        Ok(match &self.word_freq {
+            Some(wf) => rescore(&cands, wf, RESCORE_ALPHA)
+                .into_iter()
+                .map(|(c, _)| c)
+                .collect(),
+            None => cands,
+        })
+    }
+
+    /// Top-`beam` candidates in raw beam-search order (no rescoring).
+    pub fn transliterate_raw(&self, word: &str) -> Result<Vec<Candidate>> {
         let Some(src) = self.encode_source(word) else {
             bail!("no latin letters in {word:?}");
         };

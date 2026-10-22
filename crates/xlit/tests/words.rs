@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use ezhuthu_xlit::Transliterator;
+use ezhuthu_xlit::{Candidate, Transliterator};
 
 fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -66,21 +66,29 @@ fn acceptance_words_in_top5() {
 }
 
 #[test]
-fn top5_matches_python_reference() {
+fn raw_top5_matches_python_reference() {
+    compare_golden("golden_top5.tsv", |w| xlit().transliterate_raw(w));
+}
+
+#[test]
+fn rescored_top5_matches_python_reference() {
+    assert!(
+        xlit().has_word_freq(),
+        "assets/ta_word_freq.bin missing: run tools/export/word_freq.py (see README.md)"
+    );
+    compare_golden("golden_rescored_top5.tsv", |w| xlit().transliterate(w));
+}
+
+fn compare_golden(file: &str, run: impl Fn(&str) -> anyhow::Result<Vec<Candidate>>) {
     let mut mismatches = Vec::new();
-    for (word, golden) in tsv("golden_top5.tsv") {
-        let got: Vec<String> = xlit()
-            .transliterate(&word)
-            .unwrap()
-            .into_iter()
-            .map(|c| c.text)
-            .collect();
+    for (word, golden) in tsv(file) {
+        let got: Vec<String> = run(&word).unwrap().into_iter().map(|c| c.text).collect();
         let want: Vec<&str> = golden.split('|').collect();
         if got != want {
             mismatches.push(format!("{word}:\n  rust:   {got:?}\n  python: {want:?}"));
         }
     }
-    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    assert!(mismatches.is_empty(), "{file}:\n{}", mismatches.join("\n"));
 }
 
 #[test]
