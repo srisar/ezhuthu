@@ -11,7 +11,29 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 | 0: environment check | done |
 | 1: model export and parity (`tools/export/`) | done: ONNX matches PyTorch, which matches fairseq, on all test words |
 | 2: `xlit` crate and `xlit-cli` (`crates/xlit`) | done: tract, KV-cached decoder, exact top-5 parity with Python |
-| 3–5: tray app, refine, polish | not started |
+| 3: tray app (`crates/app`) | built; manual testing in target apps pending |
+| 4–5: refine, polish | not started |
+
+## The app
+
+```bash
+tools/fetch-assets.sh
+cargo build --release -p ezhuthu
+./target/release/ezhuthu.exe
+```
+
+`ezhuthu.exe` lives in the tray. In any app, press **Ctrl+Alt+T**, type Tamil in English letters, then:
+
+| Key | Action |
+|---|---|
+| ↑ / ↓, or 1–5 | choose a candidate (a digit picks it and moves to the next word) |
+| Space | keep the chosen candidate and start the next word |
+| Backspace / Ctrl+Backspace | delete a letter / a word |
+| Ctrl+V | paste text into the popup |
+| Enter | type the Tamil phrase into the app |
+| Esc | cancel |
+
+The popup never takes focus, so it also works over the Start/search box. Settings are in `%APPDATA%\ezhuthu\config.toml`; use "Open settings file" in the tray menu. It looks for model files in `assets/` next to the exe, or in the workspace `assets/` when run from a cargo build.
 
 ## Transliteration library and CLI (Rust)
 
