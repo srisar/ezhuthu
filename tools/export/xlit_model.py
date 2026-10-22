@@ -215,6 +215,79 @@ class Decoder(nn.Module):
         return F.log_softmax(self.output_projection(x), dim=-1)
 
 
+class CachedEncoder(nn.Module):
+    """src_tokens [1, S] -> cross_k, cross_v [L, 1, H, S, hd].
+
+    Runs the encoder and precomputes every decoder layer's cross-attention
+    keys/values once per word (they don't depend on the decoder state).
+    """
+
+    def __init__(self, encoder: Encoder, decoder: Decoder):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, src_tokens: Tensor) -> tuple[Tensor, Tensor]:
+        enc = self.encoder(src_tokens)
+        ks, vs = [], []
+        for layer in self.decoder.layers:
+            attn = layer.encoder_attn
+            ks.append(attn._split(attn.k_proj(enc)))
+            vs.append(attn._split(attn.v_proj(enc)))
+        return torch.stack(ks), torch.stack(vs)
+
+
+class CachedDecoderStep(nn.Module):
+    """One decoding step with a self-attention KV cache.
+
+    (tokens [B, 1], past_k/past_v [L, B, H, P, hd], cross_k/cross_v [L, 1, H, S, hd])
+      -> (lprobs [B, V], present_k/present_v [L, B, H, P+1, hd])
+
+    P = number of tokens already decoded (0 on the first step, which feeds
+    eos). Equivalent to Decoder on the full prefix, but O(T) per step.
+    """
+
+    def __init__(self, decoder: Decoder):
+        super().__init__()
+        self.d = decoder
+
+    def forward(
+        self, tokens: Tensor, past_k: Tensor, past_v: Tensor, cross_k: Tensor, cross_v: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        d = self.d
+        p = past_k.shape[3]
+        pos = torch.arange(1, device=tokens.device) + p + (PAD + 1)
+        x = d.embed_scale * d.embed_tokens(tokens) + d.pos_table[pos]
+        x = d.layernorm_embedding(x)
+        ks, vs = [], []
+        for i, layer in enumerate(d.layers):
+            sa = layer.self_attn
+            h = layer.self_attn_layer_norm(x)
+            q = sa._split(sa.q_proj(h) * sa.scaling)
+            k = torch.cat([past_k[i], sa._split(sa.k_proj(h))], dim=2)
+            v = torch.cat([past_v[i], sa._split(sa.v_proj(h))], dim=2)
+            ks.append(k)
+            vs.append(v)
+            x = x + sa.out_proj(_attend(q, k, v))
+
+            ca = layer.encoder_attn
+            h = layer.encoder_attn_layer_norm(x)
+            q = ca._split(ca.q_proj(h) * ca.scaling)
+            x = x + ca.out_proj(_attend(q, cross_k[i], cross_v[i]))
+
+            h = layer.final_layer_norm(x)
+            x = x + layer.fc2(F.gelu(layer.fc1(h)))
+        x = d.layer_norm(x[:, -1, :])
+        return F.log_softmax(d.output_projection(x), dim=-1), torch.stack(ks), torch.stack(vs)
+
+
+def _attend(q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+    """softmax(q k^T) v for q [B, H, 1, hd]; k/v batch may be 1 (broadcast)."""
+    attn = F.softmax(torch.matmul(q, k.transpose(-2, -1)), dim=-1)
+    out = torch.matmul(attn, v).transpose(1, 2)
+    return out.reshape(out.shape[0], out.shape[1], -1)
+
+
 class Xlit(nn.Module):
     def __init__(self, cfg: Config, src_vocab: int, tgt_vocab: int):
         super().__init__()

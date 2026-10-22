@@ -1,8 +1,10 @@
 """Parity: ONNX (onnxruntime) top-k must equal the PyTorch reference top-k.
 
-Runs both through the same beam search on tests/words.tsv and also reports
-the largest log-prob difference seen at any decoder step, top-1 accuracy,
-and the ONNX ops used (to check against tract's supported set).
+The ONNX decoder is the KV-cached single-step graph; the reference is the
+full-prefix PyTorch decoder (itself verified against fairseq). Both run
+through the same beam search on tests/words.tsv. Also reports the largest
+log-prob difference along the best hypothesis, top-1 accuracy, and the ONNX
+ops used (to check against tract's supported set).
 
 Usage: uv run python parity.py
 """
@@ -23,6 +25,42 @@ from export_onnx import ASSETS
 from xlit_ref import BEAM, Reference, beam_search, decode_tokens, encode_source
 
 WORDS = Path(__file__).resolve().parents[2] / "tests" / "words.tsv"
+
+
+class OrtCached:
+    """Beam-search step function over the cached ONNX graphs.
+
+    beam_search only hands over token prefixes, so each row's cache is found
+    by its prefix; equal prefixes have equal caches, so any match is right.
+    """
+
+    def __init__(self, enc: ort.InferenceSession, dec: ort.InferenceSession, src: list[int]):
+        self.dec = dec
+        self.cross_k, self.cross_v = enc.run(None, {"src_tokens": np.array([src], dtype=np.int64)})
+        self.states: dict[tuple[int, ...], tuple[np.ndarray, np.ndarray]] = {}
+
+    def __call__(self, tokens: torch.Tensor) -> torch.Tensor:
+        rows = tokens.tolist()
+        n = len(rows)
+        if len(rows[0]) == 1:
+            layers, _, heads, _, hd = self.cross_k.shape
+            past_k = past_v = np.zeros((layers, n, heads, 0, hd), dtype=np.float32)
+        else:
+            prev = [self.states[tuple(r[:-1])] for r in rows]
+            past_k = np.concatenate([k for k, _ in prev], axis=1)
+            past_v = np.concatenate([v for _, v in prev], axis=1)
+        lprobs, pk, pv = self.dec.run(
+            None,
+            {
+                "tokens": np.array([[r[-1]] for r in rows], dtype=np.int64),
+                "past_k": past_k,
+                "past_v": past_v,
+                "cross_k": self.cross_k,
+                "cross_v": self.cross_v,
+            },
+        )
+        self.states = {tuple(r): (pk[:, i : i + 1], pv[:, i : i + 1]) for i, r in enumerate(rows)}
+        return torch.from_numpy(lprobs)
 
 
 def main() -> int:
@@ -46,26 +84,19 @@ def main() -> int:
         torch_cands = ref.candidates(word)
 
         t0 = time.perf_counter()
-        enc = enc_sess.run(None, {"src_tokens": np.array([src], dtype=np.int64)})[0]
-
-        def step(tokens: torch.Tensor) -> torch.Tensor:
-            out = dec_sess.run(
-                None, {"prev_output_tokens": tokens.numpy(), "encoder_out": enc}
-            )[0]
-            return torch.from_numpy(out)
-
-        hypos = beam_search(step, ref.tgt, len(src), BEAM)
+        hypos = beam_search(OrtCached(enc_sess, dec_sess, src), ref.tgt, len(src), BEAM)
         onnx_ms.append((time.perf_counter() - t0) * 1000)
         onnx_cands = [(decode_tokens(h.tokens, ref.tgt), h.score) for h in hypos]
 
-        # per-step log-prob agreement on the top hypothesis' prefixes
+        # step-by-step log-prob agreement along the best hypothesis
         with torch.no_grad():
             tenc = ref.model.encoder(torch.tensor([src]))
             toks = [ref.tgt.eos] + hypos[0].tokens[:-1]
+            stepper = OrtCached(enc_sess, dec_sess, src)
             for t in range(1, len(toks) + 1):
                 prefix = torch.tensor([toks[:t]])
                 a = ref.model.decoder(prefix, tenc).numpy()
-                b = step(prefix).numpy()
+                b = stepper(prefix).numpy()
                 max_diff = max(max_diff, float(np.abs(a - b).max()))
 
         same = [w for w, _ in torch_cands] == [w for w, _ in onnx_cands]

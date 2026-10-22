@@ -182,7 +182,20 @@ class Reference:
         return [(decode_tokens(h.tokens, self.tgt), h.score) for h in hypos]
 
 
+def write_golden(words_file: Path) -> None:
+    """word<TAB>cand1|cand2|... for the Rust parity test (tests/golden_top5.tsv)."""
+    ref = Reference()
+    out = []
+    for word in words_file.read_text(encoding="utf-8").splitlines():
+        if word.strip():
+            out.append(word + "\t" + "|".join(w for w, _ in ref.candidates(word)))
+    sys.stdout.buffer.write(("\n".join(out) + "\n").encode("utf-8"))
+
+
 def main(words: list[str]) -> None:
+    if words[:1] == ["--golden"]:
+        write_golden(Path(words[1]))
+        return
     ref = Reference()
     for word in words:
         cands = ref.candidates(word)
