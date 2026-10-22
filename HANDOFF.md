@@ -214,7 +214,7 @@ Put these in `tests/words.tsv`, and use them both for the Python parity script a
 |---|---|---|
 | 0 | Environment check (§3) | Toolchain confirmed; nothing new installed without the user's approval |
 | 1 | `tools/export/`: Python 3.10 export and parity | ONNX matches PyTorch top-5 on every test word |
-| 2 | `ezhuthu-xlit` library crate and an `xlit-cli` binary (`xlit-cli natchathiram` prints top 5) | Test words pass; **under 30 ms per word** on CPU (release build) |
+| 2 | `ezhuthu-xlit` library crate and an `xlit-cli` binary (`xlit-cli natchathiram` prints top 5) | Test words pass; **under 40 ms per word on average** on CPU (release build). This was revised from 30 ms on 2026-10-22: tract measures 36 ms. The user chose to keep the pure-Rust runtime rather than ship onnxruntime for about 25–30 ms, since keystroke gaps are 150–250 ms either way. See §5 "Speed". |
 | 3 | Tray app: hotkey, popup, live candidates, insertion | Works in Notepad, Word, Chrome (text box), VS Code and the Windows search box |
 | 4 | `Ctrl+R` refine | Works with a key, degrades cleanly without one or offline |
 | 5 | Polish | See the backlog below |
