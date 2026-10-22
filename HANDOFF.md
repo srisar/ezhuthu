@@ -119,7 +119,12 @@ These were checked against `app/ai4bharat/transliteration/transformer/base_engin
 - **Decoder:** starts with `</s>` (id 2) only (`decoder_langtok=False`). Output characters are joined with no separator.
 - **Generation:** the official engine uses beam 4 and nbest 4. Otherwise fairseq defaults apply: lenpen 1, normalized scores (`score = Σ logp / len`, eos included), `max_len_b` 200, min length 1. **We use beam 5** because the popup shows five candidates.
 - **Rescoring:** `final = 0.9 · exp(score_i)/Σexp(score) + 0.1 · p_dict(w_i)/Σ_in-dict p_dict`. Words missing from the dictionary score 0, and ties keep beam order.
-  - The Tamil dictionary is `word_prob_dicts/ta_word_prob_dict.json` inside `https://github.com/AI4Bharat/IndicXlit/releases/download/v1.0/word_prob_dicts.zip` (850 MB zip). The JSON alone is 1.04 GB uncompressed, so it **must be pruned** into a compact `ta_word_freq.bin` before shipping (still to do).
+  - The Tamil dictionary is `word_prob_dicts/ta_word_prob_dict.json` inside `https://github.com/AI4Bharat/IndicXlit/releases/download/v1.0/word_prob_dicts.zip` (850 MB zip). The JSON alone is 1.04 GB uncompressed, so it is pruned into `ta_word_freq.bin`.
+    - The JSON holds 9.48M entries, sorted by probability descending. We keep the **top 500k** words in **9.9 MB**, stored one byte per Tamil character and binary-searched in place (`tools/export/word_freq.py`, `crates/xlit/src/word_freq.rs`).
+    - Cutoff choice: on the 35 parity words, rescored top-1 matches the full 9.48M dictionary on 32–34 words at every cutoff from 50k to 2M. The differences are loanwords plus `vazhga`, where the pruned result வாழ்க is the correct one. 1M words would be 20 MB for no measurable gain.
+    - Rescoring fixes `puthagam` → புத்தகம், `pallikoodam` → பள்ளிக்கூடம், `vazhga` → வாழ்க and `kanthasamy` → கந்தசாமி. The §8 words stay top-1.
+    - Rust matches Python's rescored top-5 exactly (`tests/golden_rescored_top5.tsv`). `Transliterator::transliterate` rescores whenever the file is present; `transliterate_raw` and `xlit-cli --raw` skip it.
+  - Assets are distributed through the private GitHub Release `assets-v1`. `tools/fetch-assets.sh` downloads it with `gh` and verifies `tools/assets.sha256`.
   - Without rescoring, the raw model already gets 9/9 test words top-1.
 - **ZWNJ:** the official engine appends ZWNJ (U+200C) after a word-final virama for every language, Tamil included, because of a condition that is always true. **We don't add it.** Tamil doesn't need it, and an invisible character would leak into the user's documents.
 - **License:** MIT for both code and models. The README says "The IndicXlit code (and models) are released under the MIT License." No separate license is stated for the word-probability dictionaries.
