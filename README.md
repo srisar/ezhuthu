@@ -11,7 +11,7 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 | 0: environment check | done |
 | 1: model export and parity (`tools/export/`) | done: ONNX matches PyTorch, which matches fairseq, on all test words |
 | 2: `xlit` crate and `xlit-cli` (`crates/xlit`) | done: tract, KV-cached decoder, exact top-5 parity with Python |
-| 3: tray app (`crates/app`) | built; manual testing in target apps pending |
+| 3: tray app (`crates/app`) | done: tested in Notepad, Chrome, Word, VS Code; Windows search box not yet tried |
 | 4–5: refine, polish | not started |
 
 ## The app
