@@ -107,6 +107,32 @@ Build with `windows_subsystem = "windows"` for release, keeping the console in d
 - The official inference can **rescore beam outputs with a word-probability dictionary**. Check whether a Tamil word-frequency file is published. If it is, port the rescoring, because it's a large part of why the output picks real words.
 - **Check the license** of the code and the weights, and record it in `README.md`.
 
+### Confirmed from source (2026-10-22)
+
+These were checked against `app/ai4bharat/transliteration/transformer/base_engine.py` in the IndicXlit repo, the checkpoint's stored config, and a run of real fairseq 0.12.2.
+
+- **Checkpoint:** fairseq `transformer` (11.49M params) trained with task `translation_multi_simple_epoch`. Pre-norm encoder and decoder, GELU (erf), sinusoidal positions, embeddings scaled by √256, `layernorm_embedding`, final `layer_norm`. The decoder output projection is separate (not shared). Embed dim 256, FFN 1024, 4 heads.
+- **Language tags:** come from `lang_list.txt` in the repo, not the zip. It has 22 entries in this order: `en as bn brx gom gu hi kn ks mai ml mni mr ne or pa sa sd si ta te ur`. fairseq appends `__xx__` tokens to every dictionary in that order.
+  - Source vocab: 54 tokens (`<s> <pad> </s> <unk>`, `a`–`z`, 2 madeupwords, 22 tags). **`__ta__` = 51.**
+  - Target vocab: 806 tokens (4 specials, 780 characters, 22 tags). All Indic `dict.*.txt` files are identical.
+- **Input:** lowercase, keep the last run of `[a-z]`, then build `[__ta__, c1, …, cn, </s>]`. The tag is a source-side **prefix**. There is no BOS.
+- **Decoder:** starts with `</s>` (id 2) only (`decoder_langtok=False`). Output characters are joined with no separator.
+- **Generation:** the official engine uses beam 4 and nbest 4. Otherwise fairseq defaults apply: lenpen 1, normalized scores (`score = Σ logp / len`, eos included), `max_len_b` 200, min length 1. **We use beam 5** because the popup shows five candidates.
+- **Rescoring:** `final = 0.9 · exp(score_i)/Σexp(score) + 0.1 · p_dict(w_i)/Σ_in-dict p_dict`. Words missing from the dictionary score 0, and ties keep beam order.
+  - The Tamil dictionary is `word_prob_dicts/ta_word_prob_dict.json` inside `https://github.com/AI4Bharat/IndicXlit/releases/download/v1.0/word_prob_dicts.zip` (850 MB zip). The JSON alone is 1.04 GB uncompressed, so it **must be pruned** into a compact `ta_word_freq.bin` before shipping (still to do).
+  - Without rescoring, the raw model already gets 9/9 test words top-1.
+- **ZWNJ:** the official engine appends ZWNJ (U+200C) after a word-final virama for every language, Tamil included, because of a condition that is always true. **We don't add it.** Tamil doesn't need it, and an invisible character would leak into the user's documents.
+- **License:** MIT for both code and models. The README says "The IndicXlit code (and models) are released under the MIT License." No separate license is stated for the word-probability dictionaries.
+- **ONNX graphs as exported (they differ from the plan in step 3):**
+  - Batch-first, with no padding mask, because we only ever encode one word.
+  - The decoder returns **`lprobs[B, V]`**: the log-softmax of the **last** position only, not `logits[B, T, V]`.
+  - `encoder_out` stays `[1, S, D]` and is broadcast across the beam inside the decoder.
+  - Opset 17, exported with the TorchScript exporter (`dynamo=False`).
+- **Parity:**
+  - `xlit_ref.py` (a minimal PyTorch port with a port of fairseq's beam search) matches real fairseq 0.12.2 exactly (top-5 and scores) on all test words.
+  - ONNX (onnxruntime) matches the PyTorch top-5 on all test words, with a maximum log-prob difference of 4.6e-5.
+  - Speed: 84 ms/word on average with onnxruntime in Python (1 thread, beam 5, no KV cache), which is **above the 30 ms target**. Phase 2 needs to measure tract in release mode. If it's too slow, the likely fixes are precomputing the cross-attention K/V or adding a KV cache.
+
 ### Known pitfalls
 
 - **fairseq doesn't work on Python 3.11+** because of its mutable dataclass defaults. Use **Python 3.10** via `uv venv --python 3.10`.
