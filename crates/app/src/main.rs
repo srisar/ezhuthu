@@ -1,5 +1,7 @@
-//! ezhuthu: Tamil phonetic input for Windows. A tray app: press the hotkey
-//! in any app, type romanized Tamil, press Enter to insert the Tamil text.
+//! ezhuthu: Tamil phonetic input for Windows. A tray app: the hotkey toggles
+//! Tamil mode, in which romanized words typed in any app become Tamil.
+//!
+//! `ezhuthu.exe --uninstall` removes an installed copy (Settings > Apps runs it).
 
 // No console window in release builds; debug builds keep it for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -24,6 +26,10 @@ use windows::Win32::UI::HiDpi::{
 use windows::core::w;
 
 fn main() {
+    if std::env::args().skip(1).any(|a| a == "--uninstall") {
+        uninstall();
+        return;
+    }
     // SAFETY: process-wide setup calls with valid arguments. The manifest
     // already declares per-monitor-v2 DPI awareness; this is a fallback.
     unsafe {
@@ -40,5 +46,37 @@ fn main() {
     }
     if let Err(e) = app::run() {
         app::report_fatal(&e);
+    }
+}
+
+/// Settings > Apps > Uninstall runs `ezhuthu.exe --uninstall`;
+/// add `--silent` for no dialogs (failure is reported as exit code 1).
+fn uninstall() {
+    let silent = std::env::args().skip(1).any(|a| a == "--silent");
+    let fail = |msg: &str| {
+        if !silent {
+            win::error_box(None, msg);
+        }
+        std::process::exit(1);
+    };
+    let here = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.to_path_buf()));
+    let installed = ezhuthu_install::install_dir().ok();
+    let Some(dir) = here.filter(|d| Some(d) == installed.as_ref()) else {
+        fail("This copy of ezhuthu isn't the installed one, so there is nothing to uninstall.");
+        return;
+    };
+    if !silent
+        && !win::ask(
+            "Remove ezhuthu from this computer?\n\nYour settings in %APPDATA%\\ezhuthu are kept.",
+        )
+    {
+        return;
+    }
+    match ezhuthu_install::uninstall(&dir) {
+        Ok(()) if !silent => win::info_box("ezhuthu was removed."),
+        Ok(()) => {}
+        Err(e) => fail(&format!("Uninstall failed:\n\n{e:#}")),
     }
 }

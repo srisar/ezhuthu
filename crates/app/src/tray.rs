@@ -17,9 +17,9 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
-    GetSystemMetrics, HICON, ICONINFO, MF_GRAYED, MF_SEPARATOR, MF_STRING, PostMessageW,
-    SM_CXSMICON, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    WM_NULL,
+    GetSystemMetrics, HICON, ICONINFO, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    PostMessageW, SM_CXSMICON, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WM_NULL,
 };
 use windows::core::PCWSTR;
 
@@ -118,8 +118,9 @@ impl Tray {
 
 /// Shows a context menu for `owner` at the cursor; returns the chosen item id
 /// (0 = none). Items: (id, label); id 0 is a disabled header, "-" a
-/// separator. Runs a modal loop, so call it without holding the app state.
-pub fn menu(owner: HWND, items: &[(usize, &str)]) -> usize {
+/// separator; ids in `checked` get a check mark. Runs a modal loop, so call
+/// it without holding the app state.
+pub fn menu(owner: HWND, items: &[(usize, &str)], checked: &[usize]) -> usize {
     // SAFETY: the menu is destroyed before returning; label buffers
     // outlive AppendMenuW, which copies them.
     unsafe {
@@ -131,6 +132,7 @@ pub fn menu(owner: HWND, items: &[(usize, &str)]) -> usize {
             let flags = match (id, label) {
                 (_, "-") => MF_SEPARATOR,
                 (0, _) => MF_STRING | MF_GRAYED,
+                _ if checked.contains(&id) => MF_STRING | MF_CHECKED,
                 _ => MF_STRING,
             };
             let _ = AppendMenuW(menu, flags, id, PCWSTR(text.as_ptr()));

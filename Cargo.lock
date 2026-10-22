@@ -221,9 +221,27 @@ name = "ezhuthu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ezhuthu-install",
  "ezhuthu-xlit",
  "serde",
  "toml",
+ "windows",
+]
+
+[[package]]
+name = "ezhuthu-install"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "windows",
+]
+
+[[package]]
+name = "ezhuthu-setup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ezhuthu-install",
  "windows",
 ]
 

@@ -2,7 +2,10 @@
 
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MESSAGEBOX_RESULT,
+    MESSAGEBOX_STYLE, MessageBoxW,
+};
 use windows::core::PCWSTR;
 
 /// NUL-terminated UTF-16 for Win32 string parameters.
@@ -34,14 +37,20 @@ pub fn scale(v: i32, dpi: u32) -> i32 {
 }
 
 pub fn error_box(owner: Option<HWND>, text: &str) {
+    message(owner, text, MB_OK | MB_ICONERROR);
+}
+
+pub fn info_box(text: &str) {
+    message(None, text, MB_OK | MB_ICONINFORMATION);
+}
+
+/// Yes/No question; true for Yes.
+pub fn ask(text: &str) -> bool {
+    message(None, text, MB_YESNO | MB_ICONQUESTION) == IDYES
+}
+
+fn message(owner: Option<HWND>, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
     let (text, title) = (wide(text), wide("ezhuthu"));
     // SAFETY: both strings are NUL-terminated and outlive the call.
-    unsafe {
-        MessageBoxW(
-            owner,
-            PCWSTR(text.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            MB_OK | MB_ICONERROR,
-        );
-    }
+    unsafe { MessageBoxW(owner, PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), style) }
 }

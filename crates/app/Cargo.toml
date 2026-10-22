@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+ezhuthu-install = { version = "0.1.0", path = "../install" }
 ezhuthu-xlit = { version = "0.1.0", path = "../xlit" }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"

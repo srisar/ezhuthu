@@ -12,7 +12,26 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 | 1: model export and parity (`tools/export/`) | done: ONNX matches PyTorch, which matches fairseq, on all test words |
 | 2: `xlit` crate and `xlit-cli` (`crates/xlit`) | done: tract, KV-cached decoder, exact top-5 parity with Python |
 | 3: tray app (`crates/app`) | done: tested in Notepad, Chrome, Word, VS Code; Windows search box not yet tried |
-| 4–5: refine, polish | not started |
+| 4: refine (Ctrl+R) | deferred |
+| 5: polish | per-user installer and Start with Windows done |
+
+## Install
+
+Run `ezhuthu-setup-<version>.exe`. It installs for the current user only, with no administrator rights, into `%LOCALAPPDATA%\Programs\ezhuthu`, and it:
+- adds a Start Menu shortcut;
+- adds an entry in **Settings > Apps**, whose uninstall runs `ezhuthu.exe --uninstall`;
+- asks whether to start with Windows (change it later from the tray menu's **Start with Windows**);
+- starts the app.
+
+Running a newer setup updates an existing install in place, and settings in `%APPDATA%\ezhuthu` are kept. The setup isn't code-signed yet, so Windows SmartScreen may warn the first time. Choose **More info > Run anyway**.
+
+To build the installer (after `tools/fetch-assets.sh`):
+
+```bash
+tools/build-installer.sh   # -> dist/ezhuthu-setup-<version>.exe
+```
+
+It is a single self-contained file: the release `ezhuthu.exe` plus the model assets.
 
 ## The app
 
