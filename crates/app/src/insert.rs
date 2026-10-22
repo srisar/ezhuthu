@@ -85,6 +85,18 @@ pub fn deliver(items: &[Out], mode: InsertMode) -> (usize, Result<()>) {
     (injected, result)
 }
 
+/// How many events `deliver` will inject for `items` if nothing fails.
+pub fn event_count(items: &[Out], mode: InsertMode) -> usize {
+    items
+        .iter()
+        .map(|item| match (item, mode) {
+            (Out::Key { .. }, _) => 1,
+            (Out::Text(t), InsertMode::Unicode) => 2 * printable(t).encode_utf16().count(),
+            (Out::Text(_), InsertMode::Clipboard) => 4, // Ctrl down, V down, V up, Ctrl up
+        })
+        .sum()
+}
+
 fn key(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -306,5 +318,30 @@ fn process_elevated(process: HANDLE) -> Option<bool> {
         let _ = CloseHandle(token);
         ok.ok()?;
         Some(elevation.TokenIsElevated != 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_the_events_deliver_will_inject() {
+        let key = Out::Key {
+            vk: 0x41,
+            scan: 0x1E,
+            up: false,
+            extended: false,
+        };
+        let items = [Out::Text("அம்மா ".into()), key];
+        // 6 UTF-16 units x (down + up) + 1 replayed key
+        assert_eq!(event_count(&items, InsertMode::Unicode), 13);
+        // Ctrl+V (4 events) + 1 replayed key
+        assert_eq!(event_count(&items, InsertMode::Clipboard), 5);
+        // control characters are never typed
+        assert_eq!(
+            event_count(&[Out::Text("a\tb".into())], InsertMode::Unicode),
+            4
+        );
     }
 }

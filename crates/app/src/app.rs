@@ -53,6 +53,7 @@ use crate::caret;
 use crate::compose::Composer;
 use crate::config::{Config, InsertMode};
 use crate::engine::{Engine, Event};
+use crate::focus;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::insert::{self, Out};
 use crate::popup::{Popup, View};
@@ -67,6 +68,8 @@ const WM_APP_FOREGROUND: u32 = WM_APP + 5;
 const NIN_SELECT: u32 = WM_USER;
 const HOTKEY_ID: i32 = 1;
 const MAX_ROWS: usize = 9;
+/// Words kept in the candidate cache before it is cleared.
+const MAX_CACHE: usize = 2000;
 /// Give up waiting for our injected events after this long (e.g. UIPI
 /// silently dropped them), so real keys are never held back for good.
 const IN_FLIGHT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -141,6 +144,7 @@ pub fn run() -> Result<()> {
     // SAFETY: the string is a valid NUL-terminated literal.
     TASKBAR_CREATED.set(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) });
 
+    focus::start();
     let engine = Engine::start(config.assets_dir(), config.beam, main, WM_APP_ENGINE);
     let mut app = App {
         main,
@@ -322,6 +326,8 @@ impl App {
                 }
             }
             self.swallowed.clear();
+            // Forget what was typed this session.
+            self.cache.clear();
         }
         let tip = tooltip(&self.config, self.on);
         self.tray.set_state(self.on, &tip);
@@ -500,6 +506,11 @@ impl App {
                 return true;
             }
         }
+        if focus::in_password_field() {
+            // Password field: never compose, show or cache; keys type as-is.
+            self.discard();
+            return false;
+        }
         let composing = !self.composer.is_empty();
         self.flash = None;
         if alt || win {
@@ -609,15 +620,28 @@ fn flush() {
         if a.waiting() || a.outbox.is_empty() {
             return None;
         }
-        Some((std::mem::take(&mut a.outbox), a.config.insert_mode))
+        let items = std::mem::take(&mut a.outbox);
+        let mode = a.config.insert_mode;
+        // SendInput runs our hook re-entrantly, before it returns, so the
+        // events must be counted as in flight before they are sent.
+        let expected = insert::event_count(&items, mode);
+        a.in_flight += expected;
+        a.in_flight_since = Instant::now();
+        Some((items, mode, expected))
     })
     .flatten();
-    let Some((items, mode)) = job else { return };
+    let Some((items, mode, expected)) = job else {
+        return;
+    };
     let (injected, result) = insert::deliver(&items, mode);
     with_app(|a| {
-        if injected > 0 {
-            a.in_flight += injected;
-            a.in_flight_since = Instant::now();
+        // Events that were never sent will never come back.
+        a.in_flight = a
+            .in_flight
+            .saturating_sub(expected.saturating_sub(injected));
+        if a.in_flight == 0 && !a.outbox.is_empty() && !a.flush_posted {
+            a.flush_posted = true;
+            post(a.main, WM_APP_FLUSH);
         }
         if let Err(e) = result {
             let hint = if mode == InsertMode::Unicode {
@@ -651,6 +675,10 @@ fn on_engine_events() {
                 }
                 Event::Done { key, candidates } => {
                     a.pending.remove(&key);
+                    // Bounded: typed words should not pile up in memory.
+                    if a.cache.len() >= MAX_CACHE {
+                        a.cache.clear();
+                    }
                     a.cache.insert(key, candidates);
                 }
             }

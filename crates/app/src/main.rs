@@ -9,6 +9,7 @@ mod caret;
 mod compose;
 mod config;
 mod engine;
+mod focus;
 mod hotkey;
 mod insert;
 mod popup;
