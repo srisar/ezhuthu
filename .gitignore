@@ -1,0 +1,18 @@
+# Rust
+/target/
+
+# Model assets: fetched by tools/fetch-assets, never committed
+/assets/*
+!/assets/README.md
+
+# Python export tooling
+.venv/
+__pycache__/
+*.pyc
+/tools/export/work/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
