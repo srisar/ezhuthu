@@ -79,19 +79,23 @@ impl Config {
         Ok(config)
     }
 
-    /// Model folder: the configured one, else `assets` next to the exe, else
-    /// the workspace `assets/` (when running from a cargo build).
+    /// Model folder: the configured one, else `assets` next to the exe.
+    ///
+    /// Dev builds (debug assertions on: `dev` and `fast` profiles) also fall
+    /// back to the workspace `assets/`. Release builds never look at that
+    /// compile-time path, so nothing planted there on another machine loads.
     pub fn assets_dir(&self) -> PathBuf {
         if let Some(dir) = &self.assets_dir {
             return dir.clone();
         }
         let beside_exe = std::env::current_exe()
             .ok()
-            .and_then(|exe| exe.parent().map(|d| d.join("assets")));
-        match beside_exe {
-            Some(dir) if dir.join("vocab_src.json").exists() => dir,
-            _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets"),
+            .and_then(|exe| exe.parent().map(|d| d.join("assets")))
+            .unwrap_or_else(|| PathBuf::from("assets"));
+        if cfg!(debug_assertions) && !beside_exe.join("vocab_src.json").exists() {
+            return Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
         }
+        beside_exe
     }
 }
 
