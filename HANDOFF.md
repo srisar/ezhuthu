@@ -123,15 +123,29 @@ These were checked against `app/ai4bharat/transliteration/transformer/base_engin
   - Without rescoring, the raw model already gets 9/9 test words top-1.
 - **ZWNJ:** the official engine appends ZWNJ (U+200C) after a word-final virama for every language, Tamil included, because of a condition that is always true. **We don't add it.** Tamil doesn't need it, and an invisible character would leak into the user's documents.
 - **License:** MIT for both code and models. The README says "The IndicXlit code (and models) are released under the MIT License." No separate license is stated for the word-probability dictionaries.
-- **ONNX graphs as exported (they differ from the plan in step 3):**
-  - Batch-first, with no padding mask, because we only ever encode one word.
-  - The decoder returns **`lprobs[B, V]`**: the log-softmax of the **last** position only, not `logits[B, T, V]`.
-  - `encoder_out` stays `[1, S, D]` and is broadcast across the beam inside the decoder.
-  - Opset 17, exported with the TorchScript exporter (`dynamo=False`).
+- **ONNX graphs as exported (they differ from the plan in step 3, and the decoder now uses a KV cache):**
+  - In Phase 2 the no-cache decoder measured **108 ms/word** in tract release. Re-running the full prefix for 5 beams costs about 3 GMAC per word, because the cost grows quadratically with length. So the "no KV cache" assumption was dropped.
+  - `xlit_encoder.onnx`: `src_tokens[1, S]` → `cross_k`, `cross_v` `[L=6, 1, H=4, S, 64]`. This is the encoder plus every decoder layer's cross-attention K/V, computed once per word.
+  - `xlit_decoder.onnx` handles one step: `tokens[B, 1]`, `past_k`/`past_v` `[6, B, 4, P, 64]` and `cross_k`/`cross_v` go in, and `lprobs[B, V]` plus `present_k`/`present_v` `[6, B, 4, P+1, 64]` come out.
+    - The first step feeds `</s>` with an empty past (P = 0), which both tract and onnxruntime accept.
+    - The caller reorders the cache rows by beam parent each step (`gather_rows` in `crates/xlit`).
+  - Batch-first, with no padding mask, because we only ever encode one word. Opset 17, exported with the TorchScript exporter (`dynamo=False`).
 - **Parity:**
   - `xlit_ref.py` (a minimal PyTorch port with a port of fairseq's beam search) matches real fairseq 0.12.2 exactly (top-5 and scores) on all test words.
-  - ONNX (onnxruntime) matches the PyTorch top-5 on all test words, with a maximum log-prob difference of 4.6e-5.
-  - Speed: 84 ms/word on average with onnxruntime in Python (1 thread, beam 5, no KV cache), which is **above the 30 ms target**. Phase 2 needs to measure tract in release mode. If it's too slow, the likely fixes are precomputing the cross-attention K/V or adding a KV cache.
+  - The cached ONNX graphs (onnxruntime) match the full-prefix PyTorch top-5 on all test words, with a maximum log-prob difference of 4.6e-5.
+  - The Rust crate (tract) matches the Python top-5 exactly on all 35 words in `tests/parity_words.txt`. `tests/golden_top5.tsv` is produced by `xlit_ref.py --golden`.
+- **Speed (Phase 2, i5-13400, beam 5, release build):**
+
+  | Variant | ms/word (mean / max over §8 words) |
+  |---|---|
+  | tract, no KV cache | 108 / 191 |
+  | **tract, KV cache (current)** | **36–37 / 58–62** |
+  | tract, int8 dynamic quantization | 225 / 491 (tract's integer matmul path is slow) |
+  | onnxruntime, KV cache (raw graph timings, not an end-to-end run) | about 30 with 1 thread, about 25 with 2–4 threads (projected) |
+
+  - A per-op profile (`cargo run --profile fast --example profile_ops`) shows matmuls take 3.3 of the 4.1 ms per decoder step.
+  - With 5 activation rows per step, the step is memory-bound: the 24 MB of fp32 decoder weights don't fit in the 20 MB L3. tract's multithreaded executor and concrete (non-symbolic) shapes didn't help.
+  - **int8 is rejected** on both counts: it's 6× slower in tract, and accuracy changes. Top-1 differs on 2 of 35 parity words, lower ranks reshuffle and sometimes surface junk, though the §8 words stay top-1. `tools/export/quantize.py` reproduces this.
 
 ### Known pitfalls
 
@@ -200,7 +214,7 @@ Put these in `tests/words.tsv`, and use them both for the Python parity script a
 |---|---|---|
 | 0 | Environment check (§3) | Toolchain confirmed; nothing new installed without the user's approval |
 | 1 | `tools/export/`: Python 3.10 export and parity | ONNX matches PyTorch top-5 on every test word |
-| 2 | `ezhuthu-xlit` library crate and an `xlit-cli` binary (`xlit-cli natchathiram` prints top 5) | Test words pass; **under 30 ms per word** on CPU (release build) |
+| 2 | `ezhuthu-xlit` library crate and an `xlit-cli` binary (`xlit-cli natchathiram` prints top 5) | Test words pass; **under 40 ms per word on average** on CPU (release build). This was revised from 30 ms on 2026-10-22: tract measures 36 ms. The user chose to keep the pure-Rust runtime rather than ship onnxruntime for about 25–30 ms, since keystroke gaps are 150–250 ms either way. See §5 "Speed". |
 | 3 | Tray app: hotkey, popup, live candidates, insertion | Works in Notepad, Word, Chrome (text box), VS Code and the Windows search box |
 | 4 | `Ctrl+R` refine | Works with a key, degrades cleanly without one or offline |
 | 5 | Polish | See the backlog below |

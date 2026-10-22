@@ -10,8 +10,22 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 |---|---|
 | 0: environment check | done |
 | 1: model export and parity (`tools/export/`) | done: ONNX matches PyTorch, which matches fairseq, on all test words |
-| 2: `xlit` crate and `xlit-cli` | not started |
+| 2: `xlit` crate and `xlit-cli` (`crates/xlit`) | done: tract, KV-cached decoder, exact top-5 parity with Python |
 | 3–5: tray app, refine, polish | not started |
+
+## Transliteration library and CLI (Rust)
+
+`crates/xlit` (`ezhuthu-xlit`) is pure Rust: ONNX runs on [tract](https://github.com/sonos/tract), with no DLLs. It needs the exported assets in `assets/` (see below).
+
+```bash
+cargo run --release --bin xlit-cli -- natchathiram vanakkam
+cargo run --release --bin xlit-cli -- --bench tests/words.tsv
+cargo test --release -p ezhuthu-xlit
+```
+
+The tests check the §8 acceptance words (each expected word in the top 5) and exact top-5 parity with the Python reference on `tests/golden_top5.tsv`. To regenerate that file after re-exporting, run `uv run python xlit_ref.py --golden ../../tests/parity_words.txt > ../../tests/golden_top5.tsv` from `tools/export`.
+
+The release profile uses LTO with `codegen-units = 1`, so the first release build takes several minutes.
 
 ## Model export (one-time, Python)
 
