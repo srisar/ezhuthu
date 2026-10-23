@@ -11,7 +11,32 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 | 0: environment check | done |
 | 1: model export and parity (`tools/export/`) | done: ONNX matches PyTorch, which matches fairseq, on all test words |
 | 2: `xlit` crate and `xlit-cli` (`crates/xlit`) | done: tract, KV-cached decoder, exact top-5 parity with Python |
-| 3–5: tray app, refine, polish | not started |
+| 3: tray app (`crates/app`) | done: tested in Notepad, Chrome, Word, VS Code; Windows search box not yet tried |
+| 4–5: refine, polish | not started |
+
+## The app
+
+```bash
+tools/fetch-assets.sh
+cargo build --release -p ezhuthu
+./target/release/ezhuthu.exe
+```
+
+`ezhuthu.exe` lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray icon is blue when it's on and grey when it's off. While it's on, type Tamil in English letters in any app, a word at a time. A popup at the caret shows the candidates:
+
+| Key (while a word is in progress) | Action |
+|---|---|
+| Space | insert the chosen Tamil word and a space |
+| Enter | insert the chosen word without a space |
+| 1–5 | insert that candidate and a space |
+| ↑ / ↓ | choose a candidate |
+| Backspace / Ctrl+Backspace | delete a letter / drop the word |
+| Esc | drop the word |
+| any other key (Tab, arrows, Ctrl+S…) | insert the word, then the key does its usual job |
+
+When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start/search box.
+
+Settings are in `%APPDATA%\ezhuthu\config.toml`; use "Open settings file" in the tray menu. The app looks for model files in `assets/` next to the exe. Dev builds (`dev` and `fast` profiles) also look in the workspace `assets/`.
 
 ## Transliteration library and CLI (Rust)
 
