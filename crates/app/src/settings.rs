@@ -1,40 +1,50 @@
-//! The Settings window (tray menu > Settings...): hotkey, insert method,
-//! suggestions per word, Start with Windows. Modeless; it runs in the app's
-//! message loop (which routes its keys through IsDialogMessageW).
+//! The Settings window (tray menu > Settings...), in two tabs:
+//! - General: Tamil mode shortcut (presets or a custom combination), typing
+//!   (suggestions per word, insert method) and startup;
+//! - About: the app, who made it, and credits for the model and libraries.
 //!
-//! OK calls the app's `apply` callback, which validates and saves; if that
-//! fails (e.g. the hotkey is taken) the window stays open with the message.
+//! Modeless; it runs in the app's message loop (which routes its keys
+//! through IsDialogMessageW). OK calls the app's `apply` callback, which
+//! validates and saves; if that fails (e.g. the shortcut is taken) the
+//! window stays open with the message.
 
 use std::cell::RefCell;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, GetSysColorBrush, HBRUSH,
-    HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, SetBkMode,
-    TRANSPARENT,
+    CLR_INVALID, COLOR_GRAYTEXT, COLOR_WINDOW, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateFontIndirectW, CreateSolidBrush, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
+    GetPixel, GetSysColor, GetSysColorBrush, GetTextExtentPoint32W, HBRUSH, HDC, HFONT, HGDIOBJ,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, ReleaseDC, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    BST_CHECKED, BST_UNCHECKED, CheckDlgButton, IsDlgButtonChecked,
+    BST_CHECKED, BST_UNCHECKED, CheckDlgButton, ICC_LINK_CLASS, ICC_TAB_CLASSES,
+    INITCOMMONCONTROLSEX, InitCommonControlsEx, IsDlgButtonChecked, NM_CLICK, NM_RETURN, NMHDR,
+    NMLINK, TCIF_TEXT, TCITEMW, TCM_GETCURSEL, TCM_INSERTITEMW, TCN_SELCHANGE, WC_LINK,
+    WC_TABCONTROLW,
 };
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForSystem, SystemParametersInfoForDpi,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
-use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, DLGC_WANTALLKEYS,
-    DefWindowProcW, DestroyWindow, ES_READONLY, GetDlgItem, HMENU, IDC_ARROW, IDCANCEL, IDOK,
-    LoadCursorW, LoadIconW, MB_ICONWARNING, MB_OK, MessageBoxW, NONCLIENTMETRICSW,
-    RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_SHOW, SendMessageW, SetForegroundWindow,
-    SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_SETFONT, WM_SYSCHAR,
-    WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_GROUP, WS_OVERLAPPED,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    DefWindowProcW, DestroyIcon, DestroyWindow, ES_READONLY, GetClientRect, GetDlgCtrlID,
+    GetDlgItem, HICON, HMENU, IDC_ARROW, IDCANCEL, IDOK, IMAGE_ICON, LR_DEFAULTCOLOR, LoadCursorW,
+    LoadIconW, LoadImageW, MB_ICONWARNING, MB_OK, MessageBoxW, NONCLIENTMETRICSW, PRF_CLIENT,
+    RegisterClassExW, SPI_GETNONCLIENTMETRICS, STM_SETICON, SW_HIDE, SW_SHOW, SW_SHOWNORMAL,
+    SendMessageW, SetForegroundWindow, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN,
+    WM_NOTIFY, WM_PRINTCLIENT, WM_SETFONT, WM_SYSCHAR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_GROUP, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
 use crate::config::InsertMode;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
@@ -45,8 +55,25 @@ const ID_TYPE: i32 = 11;
 const ID_PASTE: i32 = 12;
 const ID_BEAM: i32 = 13;
 const ID_AUTOSTART: i32 = 14;
+const ID_TABS: i32 = 15;
+/// Radio buttons for the presets, then "Custom".
+const ID_PRESET: i32 = 20;
+const ID_CUSTOM: i32 = ID_PRESET + PRESETS.len() as i32;
+/// Labels drawn in the muted (grey) text colour.
+const ID_MUTED: i32 = 40;
+/// The red heart in the "Built by" line.
+const ID_HEART: i32 = 41;
+
 /// Suggestions per word offered in the dropdown.
 const BEAM_CHOICES: std::ops::RangeInclusive<usize> = 3..=9;
+/// Shortcut presets and an optional note shown beside each.
+const PRESETS: &[(&str, &str)] = &[
+    ("Ctrl+Alt+T", "default"),
+    ("Ctrl+Space", "also used by VS Code suggestions"),
+    ("Ctrl+Shift+Space", ""),
+    ("Alt+Shift+T", ""),
+];
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Values {
@@ -62,8 +89,14 @@ pub type Apply = fn(&Values) -> Result<(), String>;
 struct Window {
     hwnd: HWND,
     font: HFONT,
-    /// The combination shown in the key box (updated as keys are pressed).
+    title_font: HFONT,
+    logo: Option<HICON>,
+    /// The tab page's background, behind the labels and buttons on it.
+    page_brush: HBRUSH,
+    /// The custom combination shown in the key box (updated as keys are pressed).
     hotkey: String,
+    /// Controls of each tab, shown or hidden as the tab changes.
+    pages: [Vec<HWND>; 2],
     apply: Apply,
     on_close: fn(),
 }
@@ -91,10 +124,23 @@ pub fn open(values: Values, apply: Apply, on_close: fn()) {
     }
 }
 
+/// Which preset `hotkey` is, if any (compared as parsed combinations).
+fn preset_index(hotkey: &str) -> Option<usize> {
+    let h = Hotkey::parse(hotkey).ok()?;
+    PRESETS
+        .iter()
+        .position(|(p, _)| Hotkey::parse(p).ok() == Some(h))
+}
+
 fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result<()> {
     // SAFETY: standard window creation on the UI thread; all strings outlive
-    // the calls that use them; the font is deleted in WM_DESTROY.
+    // the calls that use them; fonts and the logo are freed in WM_DESTROY.
     unsafe {
+        let icc = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_TAB_CLASSES | ICC_LINK_CLASS,
+        };
+        let _ = InitCommonControlsEx(&icc);
         let class = w!("ezhuthu.settings");
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -124,14 +170,18 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             dpi,
         );
         let font = CreateFontIndirectW(&ncm.lfMessageFont);
+        let mut title_lf = ncm.lfMessageFont;
+        title_lf.lfHeight = title_lf.lfHeight * 3 / 2;
+        title_lf.lfWeight = 700;
+        let title_font = CreateFontIndirectW(&title_lf);
 
-        // Client area 440 x 292 (96-DPI units), centred on the primary monitor.
+        // Client area 500 x 476 (96-DPI units), centred on the primary monitor.
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut r = RECT {
             left: 0,
             top: 0,
-            right: s(440),
-            bottom: s(292),
+            right: s(500),
+            bottom: s(476),
         };
         let _ = AdjustWindowRectExForDpi(&mut r, style, false, WINDOW_EX_STYLE(0), dpi);
         let (w, h) = (r.right - r.left, r.bottom - r.top);
@@ -159,12 +209,25 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             None,
         )?;
 
+        // Width of `text` in the message font, in 96-DPI units.
+        let text_width = |text: &str| {
+            let dc = GetDC(Some(hwnd));
+            let old = SelectObject(dc, HGDIOBJ(font.0));
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let mut size = SIZE::default();
+            let _ = GetTextExtentPoint32W(dc, &units, &mut size);
+            SelectObject(dc, old);
+            ReleaseDC(Some(hwnd), dc);
+            size.cx * 96 / dpi as i32
+        };
+
         let child = |class: PCWSTR,
                      text: &str,
                      style: u32,
                      ex: WINDOW_EX_STYLE,
                      id: i32,
-                     rect: (i32, i32, i32, i32)| {
+                     rect: (i32, i32, i32, i32)|
+         -> windows::core::Result<HWND> {
             let ctl = CreateWindowExW(
                 ex,
                 class,
@@ -178,104 +241,281 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
                 Some(HMENU(id as isize as *mut _)),
                 Some(instance()),
                 None,
+            )?;
+            SendMessageW(
+                ctl,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(1)),
             );
-            if let Ok(ctl) = ctl {
-                SendMessageW(
-                    ctl,
-                    WM_SETFONT,
-                    Some(WPARAM(font.0 as usize)),
-                    Some(LPARAM(1)),
-                );
-            }
-            ctl
+            Ok(ctl)
         };
         let none = WINDOW_EX_STYLE(0);
         let tab = WS_TABSTOP.0;
+        const SS_ETCHEDHORZ: u32 = 0x10;
+        const SS_ICON: u32 = 0x3;
+        const SS_REALSIZECONTROL: u32 = 0x40;
+        const X: i32 = 28; // left edge of tab content
+        const RIGHT: i32 = 472; // right edge of tab content
 
-        child(
-            w!("STATIC"),
-            "Tamil mode on/off:",
-            0,
+        // The tab strip; its pages' controls are siblings drawn on top of it.
+        let tabs = child(
+            WC_TABCONTROLW,
+            "",
+            tab | WS_CLIPSIBLINGS.0,
             none,
-            -1,
-            (16, 18, 150, 20),
+            ID_TABS,
+            (12, 10, 476, 414),
         )?;
-        // A read-only edit that records the pressed combination (the stock
-        // hotkey control refuses Space, so Ctrl+Space couldn't be chosen).
-        let hotkey = child(
-            w!("EDIT"),
-            &values.hotkey,
-            tab | ES_READONLY as u32,
-            WS_EX_CLIENTEDGE,
-            ID_HOTKEY,
-            (170, 14, 180, 26),
-        )?;
-        let _ = SetWindowSubclass(hotkey, Some(key_box_proc), 1, 0);
-        child(
-            w!("STATIC"),
-            "Click the box, then press the keys, e.g. Ctrl+Space.",
-            0,
-            none,
-            -1,
-            (170, 44, 260, 18),
-        )?;
+        for (i, name) in ["General", "About"].iter().enumerate() {
+            let mut text: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let item = TCITEMW {
+                mask: TCIF_TEXT,
+                pszText: PWSTR(text.as_mut_ptr()),
+                ..Default::default()
+            };
+            SendMessageW(
+                tabs,
+                TCM_INSERTITEMW,
+                Some(WPARAM(i)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
+        }
 
-        child(
-            w!("STATIC"),
-            "Insert text by:",
-            0,
-            none,
-            -1,
-            (16, 76, 400, 20),
-        )?;
-        child(
+        let page_brush = page_brush(tabs, s(24), s(60));
+
+        // A section heading: its name and a divider line to the right.
+        let section = |name: &str, y: i32| -> windows::core::Result<Vec<HWND>> {
+            let width = text_width(name) + 2;
+            Ok(vec![
+                child(w!("STATIC"), name, 0, none, -1, (X, y, width, 20))?,
+                child(
+                    w!("STATIC"),
+                    "",
+                    SS_ETCHEDHORZ,
+                    none,
+                    -1,
+                    (X + width + 8, y + 10, RIGHT - X - width - 8, 1),
+                )?,
+            ])
+        };
+        let muted = |text: &str, rect| child(w!("STATIC"), text, 0, none, ID_MUTED, rect);
+
+        // ---------------------------------------------------------------- General
+        let mut general = Vec::new();
+        general.extend(section("Tamil mode shortcut", 48)?);
+        general.push(muted(
+            "Press it anywhere to turn Tamil typing on or off.",
+            (X, 72, 420, 18),
+        )?);
+        for (i, (keys, note)) in PRESETS.iter().enumerate() {
+            let y = 96 + 24 * i as i32;
+            let first = if i == 0 { WS_GROUP.0 | tab } else { 0 };
+            general.push(child(
+                w!("BUTTON"),
+                keys,
+                first | BS_AUTORADIOBUTTON as u32,
+                none,
+                ID_PRESET + i as i32,
+                (X, y, 150, 22),
+            )?);
+            if !note.is_empty() {
+                general.push(muted(note, (X + 160, y + 2, 260, 18))?);
+            }
+        }
+        let custom_y = 96 + 24 * PRESETS.len() as i32;
+        general.push(child(
             w!("BUTTON"),
-            "Typing the characters (works in most apps)",
-            tab | WS_GROUP.0 | BS_AUTORADIOBUTTON as u32,
-            none,
-            ID_TYPE,
-            (32, 98, 392, 22),
-        )?;
-        child(
-            w!("BUTTON"),
-            "Pasting through the clipboard (for apps that garble typed Tamil)",
+            "Custom",
             BS_AUTORADIOBUTTON as u32,
             none,
-            ID_PASTE,
-            (32, 122, 392, 22),
+            ID_CUSTOM,
+            (X, custom_y, 80, 22),
+        )?);
+        // A read-only edit that records the pressed combination (the stock
+        // hotkey control refuses Space, so Ctrl+Space couldn't be chosen).
+        let preset = preset_index(&values.hotkey);
+        let custom_text = if preset.is_none() {
+            values.hotkey.clone()
+        } else {
+            String::new()
+        };
+        let key_box = child(
+            w!("EDIT"),
+            &custom_text,
+            tab | WS_GROUP.0 | ES_READONLY as u32,
+            WS_EX_CLIENTEDGE,
+            ID_HOTKEY,
+            (X + 92, custom_y - 2, 180, 26),
         )?;
+        let _ = SetWindowSubclass(key_box, Some(key_box_proc), 1, 0);
+        general.push(key_box);
+        general.push(muted(
+            "click, then press keys",
+            (X + 282, custom_y + 2, 150, 18),
+        )?);
 
-        child(
+        general.extend(section("Typing", 232)?);
+        general.push(child(
             w!("STATIC"),
-            "Suggestions per word:",
+            "Suggestions per word",
             0,
             none,
             -1,
-            (16, 162, 150, 20),
-        )?;
+            (X, 258, 200, 20),
+        )?);
         let beam = child(
             w!("COMBOBOX"),
             "",
             tab | WS_GROUP.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32,
             none,
             ID_BEAM,
-            (170, 158, 80, 200),
+            (RIGHT - 80, 254, 80, 200),
         )?;
-        child(
+        general.push(beam);
+        general.push(child(
+            w!("STATIC"),
+            "Insert text by",
+            0,
+            none,
+            -1,
+            (X, 288, 200, 20),
+        )?);
+        for (i, (label, note)) in [
+            ("Typing the characters", "works in most apps"),
+            ("Pasting", "for apps that garble typed Tamil"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let y = 310 + 24 * i as i32;
+            let first = if i == 0 { WS_GROUP.0 | tab } else { 0 };
+            general.push(child(
+                w!("BUTTON"),
+                label,
+                first | BS_AUTORADIOBUTTON as u32,
+                none,
+                ID_TYPE + i as i32,
+                (X + 16, y, 180, 22),
+            )?);
+            general.push(muted(note, (X + 200, y + 2, 240, 18))?);
+        }
+
+        general.extend(section("Startup", 368)?);
+        general.push(child(
             w!("BUTTON"),
             "Start Ezhuthu when I sign in to Windows",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_AUTOSTART,
-            (16, 200, 408, 22),
+            (X, 392, 420, 22),
+        )?);
+
+        // ---------------------------------------------------------------- About
+        let mut about = Vec::new();
+        let logo_ctl = child(
+            w!("STATIC"),
+            "",
+            SS_ICON | SS_REALSIZECONTROL,
+            none,
+            -1,
+            (X, 54, 48, 48),
         )?;
+        let logo = LoadImageW(
+            Some(instance()),
+            PCWSTR(1 as _),
+            IMAGE_ICON,
+            s(48),
+            s(48),
+            LR_DEFAULTCOLOR,
+        )
+        .ok()
+        .map(|h| HICON(h.0));
+        if let Some(icon) = logo {
+            SendMessageW(logo_ctl, STM_SETICON, Some(WPARAM(icon.0 as usize)), None);
+        }
+        about.push(logo_ctl);
+        let title = child(w!("STATIC"), "Ezhuthu", 0, none, -1, (X + 62, 52, 300, 30))?;
+        SendMessageW(
+            title,
+            WM_SETFONT,
+            Some(WPARAM(title_font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+        about.push(title);
+        about.push(muted(
+            &format!("Version {VERSION} · Free and open source (MIT license)"),
+            (X + 62, 82, 360, 20),
+        )?);
+        let built = "Built by Gravitide from Sri Lanka with Love";
+        about.push(child(
+            WC_LINK,
+            "Built by <a href=\"https://gravitide.dev\">Gravitide</a> from Sri Lanka with Love",
+            tab,
+            none,
+            -1,
+            (X, 122, text_width(built) + 2, 20),
+        )?);
+        about.push(child(
+            w!("STATIC"),
+            "\u{2764}",
+            0,
+            none,
+            ID_HEART,
+            (X + text_width(built) + 1, 122, 20, 20),
+        )?);
+
+        about.extend(section("Credits", 160)?);
+        let credits: [(&str, &str, &str); 4] = [
+            (
+                "Transliteration model: IndicXlit by AI4Bharat",
+                "https://github.com/AI4Bharat/IndicXlit",
+                "MIT license",
+            ),
+            (
+                "Word frequencies: IndicXlit word-probability data by AI4Bharat",
+                "",
+                "MIT license",
+            ),
+            (
+                "Model runtime: tract by Sonos",
+                "https://github.com/sonos/tract",
+                "MIT / Apache-2.0",
+            ),
+            (
+                "Logo letter: Anek Tamil by Ek Type",
+                "https://fonts.google.com/specimen/Anek+Tamil",
+                "SIL Open Font License 1.1",
+            ),
+        ];
+        for (i, (what, url, license)) in credits.iter().enumerate() {
+            let y = 186 + 50 * i as i32;
+            about.push(child(w!("STATIC"), what, 0, none, -1, (X, y, 440, 20))?);
+            if url.is_empty() {
+                about.push(muted(license, (X, y + 20, 440, 20))?);
+            } else {
+                let shown = url.trim_start_matches("https://");
+                about.push(child(
+                    WC_LINK,
+                    &format!("<a href=\"{url}\">{shown}</a> · {license}"),
+                    tab,
+                    none,
+                    -1,
+                    (X, y + 20, 440, 20),
+                )?);
+            }
+        }
+        for ctl in &about {
+            let _ = ShowWindow(*ctl, SW_HIDE);
+        }
+
         child(
             w!("BUTTON"),
             "OK",
             tab | WS_GROUP.0 | BS_DEFPUSHBUTTON as u32,
             none,
             IDOK.0,
-            (256, 248, 80, 28),
+            (320, 436, 80, 28),
         )?;
         child(
             w!("BUTTON"),
@@ -283,10 +523,13 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             tab | BS_PUSHBUTTON as u32,
             none,
             IDCANCEL.0,
-            (344, 248, 80, 28),
+            (408, 436, 80, 28),
         )?;
 
         // Current values.
+        let selected = preset.map_or(ID_CUSTOM, |i| ID_PRESET + i as i32);
+        let _ = CheckDlgButton(hwnd, selected, BST_CHECKED);
+        let _ = EnableWindow(key_box, preset.is_none());
         let radio = if values.insert_mode == InsertMode::Clipboard {
             ID_PASTE
         } else {
@@ -320,14 +563,18 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             *cell.borrow_mut() = Some(Window {
                 hwnd,
                 font,
-                hotkey: values.hotkey.clone(),
+                title_font,
+                logo,
+                page_brush,
+                hotkey: custom_text,
+                pages: [general, about],
                 apply,
                 on_close,
             });
         });
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(Some(hotkey));
+        let _ = SetFocus(GetDlgItem(Some(hwnd), selected).ok());
     }
     Ok(())
 }
@@ -344,42 +591,131 @@ fn warn(hwnd: HWND, text: &str) {
     }
 }
 
-/// Reads the controls into `Values`.
-fn read(hwnd: HWND, hotkey: String) -> Values {
-    // SAFETY: reading our own controls.
-    unsafe {
-        let item = |id| GetDlgItem(Some(hwnd), id).unwrap_or_default();
-        let insert_mode = if IsDlgButtonChecked(hwnd, ID_PASTE) == BST_CHECKED.0 {
-            InsertMode::Clipboard
-        } else {
-            InsertMode::Unicode
-        };
-        let index = SendMessageW(item(ID_BEAM), CB_GETCURSEL, None, None)
-            .0
-            .max(0) as usize;
-        let beam = (BEAM_CHOICES.start() + index).min(*BEAM_CHOICES.end());
-        let autostart = IsDlgButtonChecked(hwnd, ID_AUTOSTART) == BST_CHECKED.0;
-        Values {
-            hotkey,
-            insert_mode,
-            beam,
-            autostart,
+fn checked(hwnd: HWND, id: i32) -> bool {
+    // SAFETY: reading our own control.
+    unsafe { IsDlgButtonChecked(hwnd, id) == BST_CHECKED.0 }
+}
+
+/// Reads the controls into `Values`; Err if Custom is chosen but empty.
+fn read(hwnd: HWND, custom: String) -> Result<Values, String> {
+    let hotkey = match (0..PRESETS.len()).find(|&i| checked(hwnd, ID_PRESET + i as i32)) {
+        Some(i) => PRESETS[i].0.to_string(),
+        None if custom.is_empty() => {
+            return Err(
+                "Click the Custom box and press the keys you want, or pick a preset.".into(),
+            );
         }
-    }
+        None => custom,
+    };
+    let insert_mode = if checked(hwnd, ID_PASTE) {
+        InsertMode::Clipboard
+    } else {
+        InsertMode::Unicode
+    };
+    // SAFETY: reading our own control.
+    let index = unsafe {
+        let beam = GetDlgItem(Some(hwnd), ID_BEAM).unwrap_or_default();
+        SendMessageW(beam, CB_GETCURSEL, None, None).0.max(0) as usize
+    };
+    let beam = (BEAM_CHOICES.start() + index).min(*BEAM_CHOICES.end());
+    Ok(Values {
+        hotkey,
+        insert_mode,
+        beam,
+        autostart: checked(hwnd, ID_AUTOSTART),
+    })
 }
 
 fn on_ok(hwnd: HWND) {
-    let Some((hotkey, apply)) =
+    let Some((custom, apply)) =
         WINDOW.with(|w| w.borrow().as_ref().map(|w| (w.hotkey.clone(), w.apply)))
     else {
         return;
     };
-    match apply(&read(hwnd, hotkey)) {
+    match read(hwnd, custom).and_then(|v| apply(&v)) {
         // SAFETY: closing our own window.
         Ok(()) => {
             let _ = unsafe { DestroyWindow(hwnd) };
         }
         Err(msg) => warn(hwnd, &msg),
+    }
+}
+
+/// A shortcut radio button was clicked: the key box is only for Custom.
+fn on_shortcut_choice(hwnd: HWND, id: i32) {
+    // SAFETY: enabling and focusing our own control.
+    unsafe {
+        if let Ok(key_box) = GetDlgItem(Some(hwnd), ID_HOTKEY) {
+            let custom = id == ID_CUSTOM;
+            let _ = EnableWindow(key_box, custom);
+            if custom {
+                let _ = SetFocus(Some(key_box));
+            }
+        }
+    }
+}
+
+/// A brush of the tab control's page colour, read from the pixel at (x, y)
+/// of the control as drawn (themes paint the page slightly off-white).
+fn page_brush(tabs: HWND, x: i32, y: i32) -> HBRUSH {
+    // SAFETY: draws the tab control into a temporary bitmap that is freed
+    // before returning; the brush is freed in WM_DESTROY.
+    unsafe {
+        let mut r = RECT::default();
+        let _ = GetClientRect(tabs, &mut r);
+        let screen = GetDC(Some(tabs));
+        let dc = CreateCompatibleDC(Some(screen));
+        let bitmap = CreateCompatibleBitmap(screen, r.right, r.bottom);
+        let old = SelectObject(dc, HGDIOBJ(bitmap.0));
+        SendMessageW(
+            tabs,
+            WM_PRINTCLIENT,
+            Some(WPARAM(dc.0 as usize)),
+            Some(LPARAM(PRF_CLIENT as isize)),
+        );
+        let mut color = GetPixel(dc, x, y);
+        SelectObject(dc, old);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(dc);
+        ReleaseDC(Some(tabs), screen);
+        if color.0 == CLR_INVALID {
+            color = COLORREF(GetSysColor(COLOR_WINDOW));
+        }
+        CreateSolidBrush(color)
+    }
+}
+
+/// Shows the controls of tab `index` and hides the other tab's.
+fn show_page(index: usize) {
+    let pages = WINDOW.with(|w| w.borrow().as_ref().map(|w| w.pages.clone()));
+    let Some(pages) = pages else {
+        return;
+    };
+    for (i, page) in pages.iter().enumerate() {
+        let cmd = if i == index { SW_SHOW } else { SW_HIDE };
+        for ctl in page {
+            // SAFETY: showing or hiding our own controls.
+            let _ = unsafe { ShowWindow(*ctl, cmd) };
+        }
+    }
+}
+
+/// Opens a credits link in the default browser (only our own https links).
+fn open_link(link: &NMLINK) {
+    let len = link.item.szUrl.iter().position(|&c| c == 0).unwrap_or(0);
+    let url = String::from_utf16_lossy(&link.item.szUrl[..len]);
+    if url.starts_with("https://") {
+        // SAFETY: plain shell open of an https URL.
+        unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                &HSTRING::from(url),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            );
+        }
     }
 }
 
@@ -397,16 +733,48 @@ unsafe extern "system" fn window_proc(
                 i if i == IDCANCEL.0 => {
                     let _ = unsafe { DestroyWindow(hwnd) };
                 }
+                i if (ID_PRESET..=ID_CUSTOM).contains(&i) => on_shortcut_choice(hwnd, i),
                 _ => {}
             }
             LRESULT(0)
         }
-        // White background for labels, radio buttons and the checkbox.
+        WM_NOTIFY => {
+            // SAFETY: for WM_NOTIFY, lparam points to an NMHDR (an NMLINK for
+            // SysLink clicks).
+            let hdr = unsafe { &*(lparam.0 as *const NMHDR) };
+            if hdr.code == TCN_SELCHANGE {
+                // SAFETY: asking our own tab control for its selection.
+                let index = unsafe { SendMessageW(hdr.hwndFrom, TCM_GETCURSEL, None, None).0 };
+                show_page(index.max(0) as usize);
+            } else if hdr.code == NM_CLICK || hdr.code == NM_RETURN {
+                // SAFETY: only our SysLink controls send these to this window.
+                open_link(unsafe { &*(lparam.0 as *const NMLINK) });
+            }
+            LRESULT(0)
+        }
+        // Labels, radio buttons, checkbox and links take the tab page's
+        // background; notes are grey and the heart red. The key box (a
+        // read-only edit) stays white like an input.
         WM_CTLCOLORSTATIC => {
-            // SAFETY: wparam is the control's DC for this message.
-            unsafe { SetBkMode(HDC(wparam.0 as *mut _), TRANSPARENT) };
-            let brush: HBRUSH = unsafe { GetSysColorBrush(COLOR_WINDOW) };
-            LRESULT(brush.0 as isize)
+            let dc = HDC(wparam.0 as *mut _);
+            let page = WINDOW.with(|w| w.borrow().as_ref().map(|w| w.page_brush));
+            // SAFETY: wparam is the control's DC and lparam the control.
+            unsafe {
+                SetBkMode(dc, TRANSPARENT);
+                let brush = match GetDlgCtrlID(HWND(lparam.0 as *mut _)) {
+                    ID_HOTKEY => None,
+                    ID_MUTED => {
+                        SetTextColor(dc, COLORREF(GetSysColor(COLOR_GRAYTEXT)));
+                        page
+                    }
+                    ID_HEART => {
+                        SetTextColor(dc, COLORREF(0x0030_30D8)); // BGR: #D83030
+                        page
+                    }
+                    _ => page,
+                };
+                LRESULT(brush.unwrap_or_else(|| GetSysColorBrush(COLOR_WINDOW)).0 as isize)
+            }
         }
         WM_CLOSE => {
             // SAFETY: closing our own window.
@@ -415,8 +783,15 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             if let Some(w) = WINDOW.with(|w| w.borrow_mut().take()) {
-                // SAFETY: the font is no longer used by any control.
-                let _ = unsafe { DeleteObject(HGDIOBJ(w.font.0)) };
+                // SAFETY: the fonts and icon are no longer used by any control.
+                unsafe {
+                    let _ = DeleteObject(HGDIOBJ(w.font.0));
+                    let _ = DeleteObject(HGDIOBJ(w.title_font.0));
+                    let _ = DeleteObject(HGDIOBJ(w.page_brush.0));
+                    if let Some(icon) = w.logo {
+                        let _ = DestroyIcon(icon);
+                    }
+                }
                 (w.on_close)();
             }
             LRESULT(0)
@@ -492,8 +867,17 @@ mod tests {
         TranslateMessage,
     };
 
+    #[test]
+    fn recognises_presets_however_written() {
+        assert_eq!(preset_index("Ctrl+Alt+T"), Some(0));
+        assert_eq!(preset_index("alt + ctrl + t"), Some(0));
+        assert_eq!(preset_index("Ctrl+Space"), Some(1));
+        assert_eq!(preset_index("Ctrl+Alt+K"), None);
+    }
+
     /// Opens the window for a few seconds (for screenshots); Cancel or the
     /// timeout closes it. Run with: cargo test -p ezhuthu settings_preview -- --ignored
+    /// (EZHUTHU_PREVIEW_TAB=1 starts on the About tab.)
     #[test]
     #[ignore]
     fn settings_preview() {
@@ -511,6 +895,22 @@ mod tests {
             autostart: true,
         };
         open(values, apply, closed);
+        if std::env::var("EZHUTHU_PREVIEW_TAB").as_deref() == Ok("1") {
+            show_page(1);
+            // SAFETY: selecting the About tab on our own tab control.
+            unsafe {
+                if let Some(h) = hwnd()
+                    && let Ok(tabs) = GetDlgItem(Some(h), ID_TABS)
+                {
+                    SendMessageW(
+                        tabs,
+                        windows::Win32::UI::Controls::TCM_SETCURSEL,
+                        Some(WPARAM(1)),
+                        None,
+                    );
+                }
+            }
+        }
         // SAFETY: a plain message loop with a timer that closes the window.
         unsafe {
             let timer = SetTimer(None, 0, 12000, None);
