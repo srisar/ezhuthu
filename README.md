@@ -48,11 +48,13 @@ cargo build --release -p ezhuthu
 |---|---|
 | Space | insert the chosen Tamil word and a space |
 | Enter | insert the chosen word without a space |
-| 1–5 | insert that candidate and a space |
+| 1–5 | insert that candidate and a space (the last row inserts the word as typed, in English) |
 | ↑ / ↓ | choose a candidate |
 | Backspace / Ctrl+Backspace | delete a letter / drop the word |
 | Esc | drop the word |
 | any other key (Tab, arrows, Ctrl+S…) | insert the word, then the key does its usual job |
+
+The last row of the popup is always the word exactly as you typed it, marked **English**, so a few English words don't need a mode switch: press its number, or ↓ to it and Space. With 9 suggestions per word it is the tenth row, picked with 0.
 
 When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start/search box.
 

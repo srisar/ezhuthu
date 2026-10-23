@@ -77,6 +77,11 @@ impl Composer {
         (!core.is_empty()).then(|| core.to_ascii_lowercase())
     }
 
+    /// The transliterated part as typed (case kept), offered as the English option.
+    pub fn core(&self) -> &str {
+        split_word(&self.text).core
+    }
+
     pub fn selected(&self) -> usize {
         self.selected
     }
@@ -140,6 +145,15 @@ mod tests {
         let mut c = c;
         c.move_selection(1, 2);
         assert_eq!(c.render(Some(&list)), "ஆம்மா,");
+    }
+
+    #[test]
+    fn english_option_keeps_case_and_punctuation() {
+        let mut c = typed("Hello,");
+        assert_eq!(c.core(), "Hello");
+        let list = vec!["ஹலோ".to_string(), c.core().to_string()];
+        c.select(1);
+        assert_eq!(c.render(Some(&list)), "Hello,");
     }
 
     #[test]

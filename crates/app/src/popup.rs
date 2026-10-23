@@ -28,6 +28,8 @@ pub struct View {
     pub input: String,
     pub preview: String,
     pub candidates: Vec<String>,
+    /// The row holding the word as typed (inserted as English), if shown.
+    pub english: Option<usize>,
     pub selected: usize,
     pub hint: String,
     pub warn: bool,
@@ -298,8 +300,17 @@ impl Popup {
                 } else {
                     COLOR_GRAYTEXT
                 };
-                text(mem, f.small, num_color, num, &(i + 1).to_string(), DT_LEFT);
+                // The tenth row is picked with 0.
+                let key = ((i + 1) % 10).to_string();
+                text(mem, f.small, num_color, num, &key, DT_LEFT);
                 text(mem, f.cand, fg, body, cand, DT_LEFT);
+                if view.english == Some(i) {
+                    let tag = RECT {
+                        right: row.right - scale(8, self.dpi),
+                        ..*row
+                    };
+                    text(mem, f.small, num_color, tag, "English", DT_RIGHT);
+                }
             }
 
             let hint_color = if view.warn {
@@ -398,6 +409,7 @@ mod tests {
             input: input.into(),
             preview: preview.into(),
             candidates: candidates.iter().map(|s| s.to_string()).collect(),
+            english: candidates.len().checked_sub(1),
             selected: 0,
             hint: String::new(),
             warn: false,
@@ -414,7 +426,7 @@ mod tests {
         for dpi in [96, 144] {
             popup.set_dpi(dpi);
             popup.paint(dc, &view("", "", &[]));
-            popup.paint(dc, &view("amma", "அம்மா", &["அம்மா", "ஆம்மா"]));
+            popup.paint(dc, &view("amma", "அம்மா", &["அம்மா", "ஆம்மா", "amma"]));
         }
         // SAFETY: we created it.
         let _ = unsafe { DeleteDC(dc) };
