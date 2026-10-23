@@ -14,12 +14,13 @@ use windows::Win32::Foundation::{
     WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
 use windows::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile,
@@ -311,8 +312,27 @@ pub fn close_running_app(timeout: Duration) -> bool {
 /// other users can write to would let them replace ezhuthu.exe, which runs
 /// as this user at every sign-in. Fails on drives without permissions
 /// (FAT32/exFAT), which can't be protected at all.
+///
+/// The folder must not be a link and must be owned by this user, SYSTEM or
+/// Administrators: an owner can always rewrite the permissions, so a folder
+/// another user created beforehand could be reopened by them later.
 pub fn secure_dir(dir: &Path) -> Result<()> {
+    if is_reparse_point(dir) {
+        bail!(
+            "{} is a link (junction or symlink); choose a real folder",
+            dir.display()
+        );
+    }
     let sid = current_user_sid()?;
+    let owner = owner_sid(dir)?;
+    const SYSTEM: &str = "S-1-5-18";
+    const ADMINISTRATORS: &str = "S-1-5-32-544";
+    if owner != sid && owner != SYSTEM && owner != ADMINISTRATORS {
+        bail!(
+            "{} belongs to another account ({owner}); choose a folder you created yourself",
+            dir.display()
+        );
+    }
     let sddl = format!("D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
     // SAFETY: the security descriptor allocated by the conversion is freed
     // with LocalFree; the DACL pointer points into it and is only used before.
@@ -351,6 +371,42 @@ pub fn secure_dir(dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The owner of `path` as a SID string.
+fn owner_sid(path: &Path) -> Result<String> {
+    // SAFETY: the owner SID points into the returned security descriptor,
+    // which is freed with LocalFree after the SID has been converted.
+    unsafe {
+        let mut owner = PSID::default();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let err = GetNamedSecurityInfoW(
+            &HSTRING::from(path.as_os_str()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            &mut sd,
+        );
+        if err != ERROR_SUCCESS {
+            bail!(
+                "couldn't read who owns {} (error {}); the drive may not support \
+                 permissions (FAT32/exFAT), so choose a folder on an NTFS drive",
+                path.display(),
+                err.0
+            );
+        }
+        let mut s = PWSTR::null();
+        let converted = ConvertSidToStringSidW(owner, &mut s);
+        let sid = converted.map(|()| s.to_string());
+        if !s.is_null() {
+            let _ = LocalFree(Some(HLOCAL(s.0.cast())));
+        }
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        Ok(sid??)
+    }
 }
 
 /// The current user's SID as a string ("S-1-5-21-...").
@@ -568,5 +624,24 @@ mod tests {
         secure_dir(&dir).unwrap();
         std::fs::write(dir.join("f"), b"x").unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_secure_a_junction() {
+        let base = std::env::temp_dir().join(format!("ezhuthu-junction-{}", std::process::id()));
+        let (real, link) = (base.join("real"), base.join("link"));
+        std::fs::create_dir_all(&real).unwrap();
+        // Junctions need no special privilege (unlike symlinks).
+        let made = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "mklink /J failed");
+        let err = secure_dir(&link).unwrap_err().to_string();
+        assert!(err.contains("is a link"), "{err}");
+        std::fs::remove_dir(&link).unwrap(); // removes the junction only
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
