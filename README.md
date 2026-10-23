@@ -131,6 +131,17 @@ uv run python word_freq.py build --top 500000
 
 If you rebuild any asset, update `tools/assets.sha256` and publish a new release tag.
 
+## Icons
+
+The app and tray icons are committed in `crates/app/icons/`, and the build scripts link them into `ezhuthu.exe` and `ezhuthu-setup.exe` without a resource compiler. The mark is எ followed by a text cursor on a dark tile; the "off" tray icon is the letter on grey. `ezhuthu.svg` is the vector master. To redraw them, run this from `tools/icons` (the font is only needed here, never shipped):
+
+```bash
+curl -L -o "work/AnekTamil[wdth,wght].ttf" "https://github.com/google/fonts/raw/main/ofl/anektamil/AnekTamil%5Bwdth,wght%5D.ttf"
+uv run make_icons.py "work/AnekTamil[wdth,wght].ttf" ../../crates/app/icons --preview work/preview.png
+```
+
+The letter's outline comes from Anek Tamil ExtraBold (SIL Open Font License 1.1).
+
 ## Model source and license
 
 - Model: [AI4Bharat IndicXlit](https://github.com/AI4Bharat/IndicXlit), checkpoint `indicxlit-en-indic-v1.0`. Madhani et al., *Aksharantar: Open Indic-language Transliteration datasets and models for the Next Billion Users* (2022).
