@@ -87,6 +87,12 @@ pub fn run(path: &Path, updating: bool, autostart: bool) -> Result<Option<Choice
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(window_proc),
             hInstance: instance.into(),
+            // The exe's icon (build.rs); the small one comes from the same group.
+            hIcon: windows::Win32::UI::WindowsAndMessaging::LoadIconW(
+                Some(instance.into()),
+                PCWSTR(1 as _),
+            )
+            .unwrap_or_default(),
             hbrBackground: GetSysColorBrush(COLOR_WINDOW),
             hCursor: windows::Win32::UI::WindowsAndMessaging::LoadCursorW(
                 None,

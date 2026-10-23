@@ -27,12 +27,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, DLGC_WANTALLKEYS,
     DefWindowProcW, DestroyWindow, ES_READONLY, GetDlgItem, HMENU, IDC_ARROW, IDCANCEL, IDOK,
-    LoadCursorW, MB_ICONWARNING, MB_OK, MessageBoxW, NONCLIENTMETRICSW, RegisterClassExW,
-    SPI_GETNONCLIENTMETRICS, SW_SHOW, SendMessageW, SetForegroundWindow, SetWindowTextW,
-    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_SETFONT, WM_SYSCHAR, WM_SYSKEYDOWN, WNDCLASSEXW,
-    WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_GROUP, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    LoadCursorW, LoadIconW, MB_ICONWARNING, MB_OK, MessageBoxW, NONCLIENTMETRICSW,
+    RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_SHOW, SendMessageW, SetForegroundWindow,
+    SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_SETFONT, WM_SYSCHAR,
+    WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_GROUP, WS_OVERLAPPED,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -100,6 +100,9 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(window_proc),
             hInstance: instance(),
+            // The app icon linked in by build.rs (resource id 1), for the title
+            // bar and taskbar.
+            hIcon: LoadIconW(Some(instance()), PCWSTR(1 as _)).unwrap_or_default(),
             hbrBackground: GetSysColorBrush(COLOR_WINDOW),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             lpszClassName: class,

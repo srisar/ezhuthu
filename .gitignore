@@ -10,6 +10,7 @@
 __pycache__/
 *.pyc
 /tools/export/work/
+/tools/icons/work/
 
 # Editors / OS
 .vscode/

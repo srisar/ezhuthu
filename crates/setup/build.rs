@@ -5,6 +5,11 @@
 // compiles but refuses to run, so workspace builds and tests keep working.
 // tools/build-installer.sh sets EZHUTHU_REQUIRE_PAYLOAD=1 to make a missing
 // file a build error instead.
+//
+// Also links the app's icon in as the setup's own (resource id 1).
+
+#[path = "../app/icons/res.rs"]
+mod res;
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -26,6 +31,15 @@ fn main() {
     println!(
         "cargo:rustc-link-arg-bin=ezhuthu-setup=/MANIFESTINPUT:{}",
         manifest.display()
+    );
+
+    let icon = root.join("crates/app/icons/ezhuthu.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
+    let icon_res = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("icons.res");
+    std::fs::write(&icon_res, res::icons(&[(1, icon)])).unwrap();
+    println!(
+        "cargo:rustc-link-arg-bin=ezhuthu-setup={}",
+        icon_res.display()
     );
 
     // (path inside the install folder, source file)
