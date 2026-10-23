@@ -120,6 +120,9 @@ fn run(opts: &Options) -> Result<()> {
     install::check_install_dir(&dir)?;
     ensure_writable(&dir)?;
     install::secure_dir(&dir)?;
+    // Again, now that only this user can add files: anything that slipped in
+    // between the first check and the lock-down is caught here.
+    install::check_install_dir(&dir)?;
     let bytes = write_files(&dir)?;
     install::create_shortcut(
         &exe,
