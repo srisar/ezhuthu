@@ -28,6 +28,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 use crate::caret;
+use crate::shape::{
+    arc_distance, capsule, coverage_of, dist, ease_out, lerp2, ratio, rounded_rect, smoothstep,
+};
 use crate::win::{instance, scale, wide};
 
 const WORKING_TEXT: &str = "Converting to Tamil…";
@@ -450,70 +453,6 @@ fn coverage(font: HFONT, text: &str, size: (i32, i32), x: i32) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------- drawing math
-
-fn ratio(elapsed: Duration, total: Duration) -> f32 {
-    (elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0)
-}
-
-fn ease_out(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
-}
-
-fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
-    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// Pixel coverage from a signed distance (negative inside), anti-aliased
-/// over one pixel.
-fn coverage_of(d: f32) -> f32 {
-    (0.5 - d).clamp(0.0, 1.0)
-}
-
-fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
-    (a.0 - b.0).hypot(a.1 - b.1)
-}
-
-fn lerp2(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
-    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
-}
-
-/// Signed distance to a rounded rectangle at (x, y) sized w x h.
-fn rounded_rect(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
-    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
-    let qx = (px - cx).abs() - (w / 2.0 - r);
-    let qy = (py - cy).abs() - (h / 2.0 - r);
-    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
-}
-
-/// Distance to the segment a–b.
-fn capsule(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
-    let (abx, aby) = (b.0 - a.0, b.1 - a.1);
-    let len2 = abx * abx + aby * aby;
-    let t = if len2 > 0.0 {
-        (((p.0 - a.0) * abx + (p.1 - a.1) * aby) / len2).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    dist(p, (a.0 + abx * t, a.1 + aby * t))
-}
-
-/// Distance to the arc of radius `r` around `c` from angle `start` through
-/// `sweep` (clockwise on screen), with round ends.
-fn arc_distance(p: (f32, f32), c: (f32, f32), r: f32, start: f32, sweep: f32) -> f32 {
-    let angle = (p.1 - c.1).atan2(p.0 - c.0);
-    let rel = (angle - start).rem_euclid(TAU);
-    if rel <= sweep {
-        (dist(p, c) - r).abs()
-    } else {
-        let end = start + sweep;
-        let e1 = (c.0 + r * start.cos(), c.1 + r * start.sin());
-        let e2 = (c.0 + r * end.cos(), c.1 + r * end.sin());
-        dist(p, e1).min(dist(p, e2))
-    }
-}
-
 /// Composites `color` at `alpha` over the premultiplied accumulator.
 fn over(acc: &mut [f32; 4], color: [f32; 3], alpha: f32) {
     if alpha <= 0.0 {
@@ -535,19 +474,6 @@ fn pack(acc: [f32; 4]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shapes_have_their_edges_where_expected() {
-        // inside, on the edge, outside a 100 x 20 pill at the origin
-        assert!(rounded_rect(50.0, 10.0, 0.0, 0.0, 100.0, 20.0, 10.0) < 0.0);
-        assert!(rounded_rect(100.0, 10.0, 0.0, 0.0, 100.0, 20.0, 10.0).abs() < 1e-4);
-        assert!(rounded_rect(110.0, 10.0, 0.0, 0.0, 100.0, 20.0, 10.0) > 0.0);
-        assert!((capsule((5.0, 3.0), (0.0, 0.0), (10.0, 0.0)) - 3.0).abs() < 1e-4);
-        // a quarter arc from angle 0: on it, and off its end
-        let c = (0.0, 0.0);
-        assert!(arc_distance((0.0, 10.0), c, 10.0, 0.0, PI / 2.0) < 1e-4);
-        assert!(arc_distance((-10.0, 0.0), c, 10.0, 0.0, PI / 2.0) > 10.0);
-    }
 
     #[test]
     fn compositing_is_premultiplied() {

@@ -8,6 +8,7 @@
 
 mod app;
 mod badge;
+mod canvas;
 mod caret;
 mod compose;
 mod config;
@@ -19,7 +20,9 @@ mod insert;
 mod learned;
 mod popup;
 mod settings;
+mod shape;
 mod tray;
+mod welcome;
 mod win;
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
