@@ -1246,7 +1246,7 @@ fn open_settings() {
     }
     let actions = settings::Actions {
         apply: apply_settings,
-        forget: forget_learned,
+        suggest: suggest_words,
         on_close: settings_closed,
     };
     settings::open(current_values(), actions);
@@ -1254,7 +1254,8 @@ fn open_settings() {
 
 fn current_values() -> settings::Values {
     let autostart = ezhuthu_install::autostart_enabled();
-    let config = with_app(|a| a.config.clone()).unwrap_or_default();
+    let (config, learned) =
+        with_app(|a| (a.config.clone(), a.learned.entries())).unwrap_or_default();
     settings::Values {
         hotkey: config.hotkey,
         convert_hotkey: config.convert_hotkey,
@@ -1263,23 +1264,18 @@ fn current_values() -> settings::Values {
         remember_picks: config.remember_picks,
         theme: config.theme,
         autostart,
+        learned,
     }
 }
 
-/// Settings "Forget learned words…": clears them and deletes the file.
-fn forget_learned() -> Result<(), String> {
-    let result = with_app(|a| {
-        a.learned.clear();
-        a.learned_dirty = false;
-        match &a.learned_path {
-            Some(path) => a
-                .learned
-                .save(path)
-                .map_err(|e| format!("Couldn't delete the learned words: {e:#}")),
-            None => Ok(()),
-        }
-    });
-    result.unwrap_or_else(|| Err("Ezhuthu is busy; try again".into()))
+/// The model's suggestions for `key` (Settings > Words); none until it loads.
+fn suggest_words(key: &str) -> Vec<String> {
+    let Some(xlit) = with_app(|a| a.xlit.clone()).flatten() else {
+        return Vec::new();
+    };
+    xlit.transliterate(key)
+        .map(|c| c.into_iter().map(|c| c.text).collect())
+        .unwrap_or_default()
 }
 
 fn settings_closed() {
@@ -1330,6 +1326,15 @@ fn apply_settings(v: &settings::Values) -> Result<(), String> {
         new.theme = v.theme;
         new.save(&a.config_path)
             .map_err(|e| format!("Couldn't save the settings: {e:#}"))?;
+        if v.learned != a.learned.entries() {
+            a.learned.set(&v.learned);
+            if let Some(path) = &a.learned_path {
+                a.learned
+                    .save(path)
+                    .map_err(|e| format!("Couldn't save the learned words: {e:#}"))?;
+            }
+            a.learned_dirty = false;
+        }
         if new.beam != a.config.beam {
             a.restart_engine(new.beam);
         }

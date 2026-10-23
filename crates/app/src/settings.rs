@@ -1,6 +1,9 @@
-//! The Settings window (tray menu > Settings...), in two tabs:
-//! - General: Tamil mode shortcut (presets or a custom combination), typing
-//!   (suggestions per word, insert method) and startup;
+//! The Settings window (tray menu > Settings...), in four tabs:
+//! - General: typing (suggestions per word, insert method, remembering
+//!   picks), appearance (popup theme) and startup;
+//! - Shortcuts: Tamil mode's (presets or a custom combination) and convert
+//!   selection's;
+//! - Words: the learned words, to search, change, add and remove;
 //! - About: the app, who made it, and credits for the model and libraries.
 //!
 //! Modeless; it runs in the app's message loop (which routes its keys
@@ -19,25 +22,32 @@ use windows::Win32::Graphics::Gdi::{
     SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    BST_CHECKED, BST_UNCHECKED, CheckDlgButton, ICC_LINK_CLASS, ICC_TAB_CLASSES,
-    INITCOMMONCONTROLSEX, InitCommonControlsEx, IsDlgButtonChecked, NM_CLICK, NM_RETURN, NMHDR,
-    NMLINK, TCIF_TEXT, TCITEMW, TCM_GETCURSEL, TCM_INSERTITEMW, TCN_SELCHANGE, WC_LINK,
-    WC_TABCONTROLW,
+    BST_CHECKED, BST_UNCHECKED, CheckDlgButton, EM_SETCUEBANNER, ICC_LINK_CLASS,
+    ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+    IsDlgButtonChecked, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_PARAM, LVIF_TEXT, LVIS_SELECTED,
+    LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETITEMW, LVM_GETNEXTITEM,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE,
+    LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
+    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHOWSELALWAYS, NM_CLICK, NM_RETURN,
+    NMHDR, NMLINK, NMLVKEYDOWN, TCIF_TEXT, TCITEMW, TCM_GETCURSEL, TCM_INSERTITEMW, TCN_SELCHANGE,
+    WC_LINK, WC_LISTVIEW, WC_TABCONTROLW,
 };
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForSystem, SystemParametersInfoForDpi,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_LWIN, VK_MENU,
+    VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING,
-    CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, DLGC_WANTALLKEYS,
-    DefWindowProcW, DestroyIcon, DestroyWindow, ES_READONLY, GetClientRect, GetDlgCtrlID,
-    GetDlgItem, HICON, HMENU, IDC_ARROW, IDCANCEL, IDOK, IDYES, IMAGE_ICON, LR_DEFAULTCOLOR,
-    LoadCursorW, LoadIconW, LoadImageW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK,
-    MB_YESNO, MessageBoxW, NONCLIENTMETRICSW, PRF_CLIENT, RegisterClassExW,
+    CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CBS_AUTOHSCROLL, CBS_DROPDOWN, CBS_DROPDOWNLIST,
+    CreateWindowExW, DLGC_WANTALLKEYS, DefWindowProcW, DestroyIcon, DestroyWindow, EN_CHANGE,
+    ES_AUTOHSCROLL, ES_READONLY, GetClientRect, GetDlgCtrlID, GetDlgItem, GetParent,
+    GetWindowTextLengthW, GetWindowTextW, HICON, HMENU, IDC_ARROW, IDCANCEL, IDOK, IDYES,
+    IMAGE_ICON, LR_DEFAULTCOLOR, LoadCursorW, LoadIconW, LoadImageW, MB_ICONQUESTION,
+    MB_ICONWARNING, MB_OK, MB_YESNO, MessageBoxW, NONCLIENTMETRICSW, PRF_CLIENT, RegisterClassExW,
     SPI_GETNONCLIENTMETRICS, STM_SETICON, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SendMessageW,
     SetForegroundWindow, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR,
     WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_NOTIFY,
@@ -49,7 +59,8 @@ use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
 use crate::config::{Config, InsertMode, Theme};
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
-use crate::win::instance;
+use crate::learned;
+use crate::win::{instance, wide};
 
 const ID_HOTKEY: i32 = 10;
 const ID_TYPE: i32 = 11;
@@ -58,10 +69,18 @@ const ID_BEAM: i32 = 13;
 const ID_AUTOSTART: i32 = 14;
 const ID_TABS: i32 = 15;
 const ID_REMEMBER: i32 = 16;
-const ID_FORGET: i32 = 17;
 const ID_CONVERT_ON: i32 = 18;
 const ID_CONVERT_KEY: i32 = 19;
 const ID_THEME: i32 = 30;
+/// The Words tab: list, search box, count, the edit row and its buttons.
+const ID_WORDS: i32 = 31;
+const ID_WORD_SEARCH: i32 = 32;
+const ID_WORD_COUNT: i32 = 33;
+const ID_WORD_KEY: i32 = 34;
+const ID_WORD_TAMIL: i32 = 35;
+const ID_WORD_SAVE: i32 = 36;
+const ID_WORD_REMOVE: i32 = 37;
+const ID_WORD_CLEAR: i32 = 38;
 /// Radio buttons for the presets, then "Custom".
 const ID_PRESET: i32 = 20;
 const ID_CUSTOM: i32 = ID_PRESET + PRESETS.len() as i32;
@@ -98,6 +117,8 @@ pub struct Values {
     pub remember_picks: bool,
     pub theme: Theme,
     pub autostart: bool,
+    /// The learned words as (romanized key, Tamil word), sorted by key.
+    pub learned: Vec<(String, String)>,
 }
 
 /// Validates, applies and saves; Err(message) keeps the window open.
@@ -106,8 +127,8 @@ pub type Apply = fn(&Values) -> Result<(), String>;
 /// What the window asks of the app.
 pub struct Actions {
     pub apply: Apply,
-    /// Forgets the learned words now (the "Forget learned words…" button).
-    pub forget: fn() -> Result<(), String>,
+    /// The model's suggestions for a romanized word (the Words tab's dropdown).
+    pub suggest: fn(&str) -> Vec<String>,
     /// Runs when the window closes, whether by OK or Cancel.
     pub on_close: fn(),
 }
@@ -124,9 +145,14 @@ struct Window {
     hotkey: String,
     convert: String,
     /// Controls of each tab, shown or hidden as the tab changes.
-    pages: [Vec<HWND>; 3],
+    pages: [Vec<HWND>; 4],
+    /// The learned words being edited, sorted by key (applied on OK).
+    learned: Vec<(String, String)>,
+    /// Set while the Words tab's boxes are filled in by code, so their
+    /// change notifications are ignored.
+    filling: bool,
     apply: Apply,
-    forget: fn() -> Result<(), String>,
+    suggest: fn(&str) -> Vec<String>,
     on_close: fn(),
 }
 
@@ -167,7 +193,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
     unsafe {
         let icc = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_TAB_CLASSES | ICC_LINK_CLASS,
+            dwICC: ICC_TAB_CLASSES | ICC_LINK_CLASS | ICC_LISTVIEW_CLASSES,
         };
         let _ = InitCommonControlsEx(&icc);
         let class = w!("ezhuthu.settings");
@@ -296,7 +322,10 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             ID_TABS,
             (12, 10, 476, 414),
         )?;
-        for (i, name) in ["General", "Shortcuts", "About"].iter().enumerate() {
+        for (i, name) in ["General", "Shortcuts", "Words", "About"]
+            .iter()
+            .enumerate()
+        {
             let mut text: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
             let item = TCITEMW {
                 mask: TCIF_TEXT,
@@ -385,13 +414,9 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             ID_REMEMBER,
             (X, 180, 270, 22),
         )?);
-        general.push(child(
-            w!("BUTTON"),
-            "Forget learned words…",
-            tab | BS_PUSHBUTTON as u32,
-            none,
-            ID_FORGET,
-            (RIGHT - 160, 178, 160, 26),
+        general.push(muted(
+            "see and edit them on the Words tab",
+            (X + 280, 182, RIGHT - X - 280, 18),
         )?);
 
         general.extend(section("Appearance", 216)?);
@@ -505,6 +530,129 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
         shortcuts.push(convert_box);
         shortcuts.push(muted("click, then press keys", (X + 282, 304, 150, 18))?);
 
+        // ------------------------------------------------------------------ Words
+        let mut words = Vec::new();
+        words.extend(section("Learned words", 48)?);
+        words.push(muted(
+            "Suggestions you picked over the first one. They come first next time.",
+            (X, 72, RIGHT - X, 18),
+        )?);
+        let search = child(
+            w!("EDIT"),
+            "",
+            tab | WS_GROUP.0 | ES_AUTOHSCROLL as u32,
+            WS_EX_CLIENTEDGE,
+            ID_WORD_SEARCH,
+            (X, 96, 220, 24),
+        )?;
+        let cue = wide("Search");
+        SendMessageW(
+            search,
+            EM_SETCUEBANNER,
+            Some(WPARAM(1)),
+            Some(LPARAM(cue.as_ptr() as isize)),
+        );
+        words.push(search);
+        const SS_RIGHT: u32 = 0x2;
+        words.push(child(
+            w!("STATIC"),
+            "",
+            SS_RIGHT,
+            none,
+            ID_WORD_COUNT,
+            (RIGHT - 200, 100, 200, 18),
+        )?);
+        let list = child(
+            WC_LISTVIEW,
+            "",
+            tab | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
+            WS_EX_CLIENTEDGE,
+            ID_WORDS,
+            (X, 128, RIGHT - X, 174),
+        )?;
+        let ex = (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as usize;
+        SendMessageW(
+            list,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            Some(WPARAM(ex)),
+            Some(LPARAM(ex as isize)),
+        );
+        for (i, (title, width)) in [("You type", 150), ("Shows first", RIGHT - X - 150 - 24)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut text = wide(title);
+            let column = LVCOLUMNW {
+                mask: LVCF_TEXT | LVCF_WIDTH,
+                cx: s(width),
+                pszText: PWSTR(text.as_mut_ptr()),
+                ..Default::default()
+            };
+            SendMessageW(
+                list,
+                LVM_INSERTCOLUMNW,
+                Some(WPARAM(i)),
+                Some(LPARAM(&column as *const _ as isize)),
+            );
+        }
+        words.push(list);
+        words.push(child(
+            w!("STATIC"),
+            "You type",
+            0,
+            none,
+            -1,
+            (X, 312, 160, 18),
+        )?);
+        words.push(child(
+            w!("STATIC"),
+            "Tamil word",
+            0,
+            none,
+            -1,
+            (X + 172, 312, 200, 18),
+        )?);
+        words.push(child(
+            w!("EDIT"),
+            "",
+            tab | WS_GROUP.0 | ES_AUTOHSCROLL as u32,
+            WS_EX_CLIENTEDGE,
+            ID_WORD_KEY,
+            (X, 332, 160, 24),
+        )?);
+        words.push(child(
+            w!("COMBOBOX"),
+            "",
+            tab | WS_VSCROLL.0 | (CBS_DROPDOWN | CBS_AUTOHSCROLL) as u32,
+            none,
+            ID_WORD_TAMIL,
+            (X + 172, 331, RIGHT - X - 172, 200),
+        )?);
+        words.push(child(
+            w!("BUTTON"),
+            "Save word",
+            tab | WS_GROUP.0 | BS_PUSHBUTTON as u32,
+            none,
+            ID_WORD_SAVE,
+            (X, 368, 100, 26),
+        )?);
+        words.push(child(
+            w!("BUTTON"),
+            "Remove",
+            tab | BS_PUSHBUTTON as u32,
+            none,
+            ID_WORD_REMOVE,
+            (X + 108, 368, 100, 26),
+        )?);
+        words.push(child(
+            w!("BUTTON"),
+            "Remove all…",
+            tab | BS_PUSHBUTTON as u32,
+            none,
+            ID_WORD_CLEAR,
+            (RIGHT - 110, 368, 110, 26),
+        )?);
+
         // ---------------------------------------------------------------- About
         let mut about = Vec::new();
         let logo_ctl = child(
@@ -610,7 +758,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
                 )?);
             }
         }
-        for ctl in shortcuts.iter().chain(&about) {
+        for ctl in shortcuts.iter().chain(&words).chain(&about) {
             let _ = ShowWindow(*ctl, SW_HIDE);
         }
 
@@ -684,14 +832,17 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
                 page_brush,
                 hotkey: custom_text,
                 convert: convert_text,
-                pages: [general, shortcuts, about],
+                pages: [general, shortcuts, words, about],
+                learned: values.learned.clone(),
+                filling: false,
                 apply: actions.apply,
-                forget: actions.forget,
+                suggest: actions.suggest,
                 on_close: actions.on_close,
             });
         });
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
+        refresh_words(hwnd);
         let _ = SetFocus(Some(beam));
     }
     Ok(())
@@ -705,18 +856,6 @@ fn warn(hwnd: HWND, text: &str) {
             &HSTRING::from(text),
             w!("Ezhuthu settings"),
             MB_OK | MB_ICONWARNING,
-        );
-    }
-}
-
-fn info(hwnd: HWND, text: &str) {
-    // SAFETY: both strings are valid for the duration of the call.
-    unsafe {
-        MessageBoxW(
-            Some(hwnd),
-            &HSTRING::from(text),
-            w!("Ezhuthu settings"),
-            MB_OK | MB_ICONINFORMATION,
         );
     }
 }
@@ -736,7 +875,12 @@ fn checked(hwnd: HWND, id: i32) -> bool {
 }
 
 /// Reads the controls into `Values`; Err if Custom is chosen but empty.
-fn read(hwnd: HWND, custom: String, convert: String) -> Result<Values, String> {
+fn read(
+    hwnd: HWND,
+    custom: String,
+    convert: String,
+    learned: Vec<(String, String)>,
+) -> Result<Values, String> {
     let hotkey = match (0..PRESETS.len()).find(|&i| checked(hwnd, ID_PRESET + i as i32)) {
         Some(i) => PRESETS[i].0.to_string(),
         None if custom.is_empty() => {
@@ -767,43 +911,362 @@ fn read(hwnd: HWND, custom: String, convert: String) -> Result<Values, String> {
         remember_picks: checked(hwnd, ID_REMEMBER),
         theme: THEMES[selection(hwnd, ID_THEME).min(THEMES.len() - 1)].0,
         autostart: checked(hwnd, ID_AUTOSTART),
+        learned,
     })
 }
 
-/// "Forget learned words…": asks, then clears them straight away.
-fn on_forget(hwnd: HWND) {
-    let Some(forget) = WINDOW.with(|w| w.borrow().as_ref().map(|w| w.forget)) else {
+// ------------------------------------------------------------------ Words tab
+
+/// A control of the Settings window by id.
+fn item(hwnd: HWND, id: i32) -> HWND {
+    // SAFETY: plain query of our own window.
+    unsafe { GetDlgItem(Some(hwnd), id) }.unwrap_or_default()
+}
+
+fn text_of(ctl: HWND) -> String {
+    // SAFETY: the buffer holds the text's length plus the NUL.
+    unsafe {
+        let len = GetWindowTextLengthW(ctl).max(0) as usize;
+        let mut buf = vec![0u16; len + 1];
+        let n = GetWindowTextW(ctl, &mut buf).max(0) as usize;
+        String::from_utf16_lossy(&buf[..n])
+    }
+}
+
+/// Sets a control's text without reacting to its change notification.
+fn fill_text(ctl: HWND, text: &str) {
+    set_filling(true);
+    // SAFETY: updating our own control.
+    let _ = unsafe { SetWindowTextW(ctl, &HSTRING::from(text)) };
+    set_filling(false);
+}
+
+fn set_filling(on: bool) {
+    WINDOW.with(|w| {
+        if let Some(w) = w.borrow_mut().as_mut() {
+            w.filling = on;
+        }
+    });
+}
+
+fn learned_words() -> Vec<(String, String)> {
+    WINDOW.with(|w| {
+        w.borrow()
+            .as_ref()
+            .map(|w| w.learned.clone())
+            .unwrap_or_default()
+    })
+}
+
+/// Refills the list with the learned words matching the search box; each
+/// row's lParam is its index in the learned list.
+fn refresh_words(hwnd: HWND) {
+    let words = learned_words();
+    let filter = text_of(item(hwnd, ID_WORD_SEARCH)).trim().to_lowercase();
+    let list = item(hwnd, ID_WORDS);
+    let mut rows = 0;
+    // SAFETY: the item structs and their strings outlive each message.
+    unsafe {
+        SendMessageW(list, LVM_DELETEALLITEMS, None, None);
+        for (i, (key, word)) in words.iter().enumerate() {
+            if !filter.is_empty() && !key.contains(&filter) && !word.contains(filter.as_str()) {
+                continue;
+            }
+            let mut key_text = wide(key);
+            let row = LVITEMW {
+                mask: LVIF_TEXT | LVIF_PARAM,
+                iItem: rows,
+                pszText: PWSTR(key_text.as_mut_ptr()),
+                lParam: LPARAM(i as isize),
+                ..Default::default()
+            };
+            let at = SendMessageW(
+                list,
+                LVM_INSERTITEMW,
+                None,
+                Some(LPARAM(&row as *const _ as isize)),
+            )
+            .0;
+            let mut word_text = wide(word);
+            let cell = LVITEMW {
+                iSubItem: 1,
+                pszText: PWSTR(word_text.as_mut_ptr()),
+                ..Default::default()
+            };
+            SendMessageW(
+                list,
+                LVM_SETITEMTEXTW,
+                Some(WPARAM(at as usize)),
+                Some(LPARAM(&cell as *const _ as isize)),
+            );
+            rows += 1;
+        }
+    }
+    let count = match (filter.is_empty(), words.len()) {
+        (true, 1) => "1 word".to_string(),
+        (true, n) => format!("{n} words"),
+        (false, n) => format!("{rows} of {n}"),
+    };
+    fill_text(item(hwnd, ID_WORD_COUNT), &count);
+}
+
+/// Indexes (into the learned list) of the selected rows.
+fn selected_words(hwnd: HWND) -> Vec<usize> {
+    let list = item(hwnd, ID_WORDS);
+    let mut out = Vec::new();
+    let mut at: isize = -1;
+    // SAFETY: querying our own list; the item struct outlives each message.
+    unsafe {
+        loop {
+            at = SendMessageW(
+                list,
+                LVM_GETNEXTITEM,
+                Some(WPARAM(at as usize)),
+                Some(LPARAM(LVNI_SELECTED as isize)),
+            )
+            .0;
+            if at < 0 {
+                break;
+            }
+            let mut row = LVITEMW {
+                mask: LVIF_PARAM,
+                iItem: at as i32,
+                ..Default::default()
+            };
+            SendMessageW(
+                list,
+                LVM_GETITEMW,
+                None,
+                Some(LPARAM(&mut row as *mut _ as isize)),
+            );
+            out.push(row.lParam.0 as usize);
+        }
+    }
+    out
+}
+
+/// Selects (only) the row showing learned word `index`, if it is shown.
+fn select_word(hwnd: HWND, index: usize) {
+    let list = item(hwnd, ID_WORDS);
+    // SAFETY: setting the state of our own list's rows.
+    unsafe {
+        let none = LVITEMW {
+            stateMask: LVIS_SELECTED,
+            ..Default::default()
+        };
+        SendMessageW(
+            list,
+            LVM_SETITEMSTATE,
+            Some(WPARAM(usize::MAX)),
+            Some(LPARAM(&none as *const _ as isize)),
+        );
+        let mut at: isize = -1;
+        loop {
+            at = SendMessageW(list, LVM_GETNEXTITEM, Some(WPARAM(at as usize)), None).0;
+            if at < 0 {
+                return;
+            }
+            let mut row = LVITEMW {
+                mask: LVIF_PARAM,
+                iItem: at as i32,
+                ..Default::default()
+            };
+            SendMessageW(
+                list,
+                LVM_GETITEMW,
+                None,
+                Some(LPARAM(&mut row as *mut _ as isize)),
+            );
+            if row.lParam.0 as usize == index {
+                let selected = LVITEMW {
+                    state: LVIS_SELECTED,
+                    stateMask: LVIS_SELECTED,
+                    ..Default::default()
+                };
+                SendMessageW(
+                    list,
+                    LVM_SETITEMSTATE,
+                    Some(WPARAM(at as usize)),
+                    Some(LPARAM(&selected as *const _ as isize)),
+                );
+                SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(at as usize)), None);
+                return;
+            }
+        }
+    }
+}
+
+/// Fills the Tamil dropdown with the model's suggestions for `key`, showing
+/// `current` (or the first suggestion).
+fn fill_suggestions(hwnd: HWND, key: &str, current: Option<&str>) {
+    let Some(suggest) = WINDOW.with(|w| w.borrow().as_ref().map(|w| w.suggest)) else {
         return;
     };
+    let mut options = if key.is_empty() {
+        Vec::new()
+    } else {
+        suggest(key)
+    };
+    if let Some(c) = current
+        && !options.iter().any(|o| o == c)
+    {
+        options.insert(0, c.to_string());
+    }
+    let combo = item(hwnd, ID_WORD_TAMIL);
+    // SAFETY: filling our own combo box; each string outlives its message.
+    unsafe {
+        SendMessageW(combo, CB_RESETCONTENT, None, None);
+        for option in &options {
+            SendMessageW(
+                combo,
+                CB_ADDSTRING,
+                None,
+                Some(LPARAM(HSTRING::from(option.as_str()).as_ptr() as isize)),
+            );
+        }
+    }
+    let shown = current
+        .or(options.first().map(String::as_str))
+        .unwrap_or("");
+    fill_text(combo, shown);
+}
+
+/// A row was selected: put its word in the edit boxes.
+fn on_word_selected(hwnd: HWND) {
+    let [index] = selected_words(hwnd)[..] else {
+        return;
+    };
+    let Some((key, word)) = learned_words().get(index).cloned() else {
+        return;
+    };
+    fill_text(item(hwnd, ID_WORD_KEY), &key);
+    fill_suggestions(hwnd, &key, Some(&word));
+}
+
+/// The "You type" box changed: offer suggestions for it.
+fn on_word_key_changed(hwnd: HWND) {
+    let key = text_of(item(hwnd, ID_WORD_KEY)).trim().to_ascii_lowercase();
+    let known = learned_words()
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, w)| w);
+    fill_suggestions(hwnd, &key, known.as_deref());
+}
+
+/// "Save word": adds the word, or changes its Tamil spelling.
+fn on_word_save(hwnd: HWND) {
+    let key = text_of(item(hwnd, ID_WORD_KEY)).trim().to_ascii_lowercase();
+    let word = text_of(item(hwnd, ID_WORD_TAMIL)).trim().to_string();
+    if !learned::valid(&key, &word) {
+        warn(
+            hwnd,
+            "Type the word in English letters (a–z only), then choose its Tamil \
+             spelling from the list (or paste one).",
+        );
+        return;
+    }
+    let index = WINDOW.with(|w| {
+        let mut w = w.borrow_mut();
+        let list = &mut w.as_mut()?.learned;
+        Some(match list.binary_search_by(|(k, _)| k.as_str().cmp(&key)) {
+            Ok(i) => {
+                list[i].1 = word;
+                i
+            }
+            Err(i) => {
+                list.insert(i, (key, word));
+                i
+            }
+        })
+    });
+    // Show it, even if the search would hide it.
+    fill_text(item(hwnd, ID_WORD_SEARCH), "");
+    refresh_words(hwnd);
+    if let Some(i) = index {
+        select_word(hwnd, i);
+    }
+}
+
+/// "Remove" (or Delete in the list): removes the selected words.
+fn on_word_remove(hwnd: HWND) {
+    let mut selected = selected_words(hwnd);
+    if selected.is_empty() {
+        return;
+    }
+    selected.sort_unstable_by(|a, b| b.cmp(a));
+    WINDOW.with(|w| {
+        if let Some(w) = w.borrow_mut().as_mut() {
+            for i in selected {
+                if i < w.learned.len() {
+                    w.learned.remove(i);
+                }
+            }
+        }
+    });
+    refresh_words(hwnd);
+    fill_text(item(hwnd, ID_WORD_KEY), "");
+    fill_suggestions(hwnd, "", None);
+}
+
+/// "Remove all…": asks, then empties the list.
+fn on_word_clear(hwnd: HWND) {
+    if learned_words().is_empty() {
+        return;
+    }
     // SAFETY: a message box owned by our window; both strings are valid.
     let answer = unsafe {
         MessageBoxW(
             Some(hwnd),
-            w!(
-                "Forget the suggestions Ezhuthu has learned from your picks?\n\n\
-                Every word goes back to the model's own order."
-            ),
+            w!("Remove every learned word?\n\n\
+                 Each word goes back to the model's own order when you press OK."),
             w!("Ezhuthu settings"),
             MB_YESNO | MB_ICONQUESTION,
         )
     };
     if answer == IDYES {
-        match forget() {
-            Ok(()) => info(hwnd, "Learned words forgotten."),
-            Err(msg) => warn(hwnd, &msg),
+        WINDOW.with(|w| {
+            if let Some(w) = w.borrow_mut().as_mut() {
+                w.learned.clear();
+            }
+        });
+        refresh_words(hwnd);
+        fill_text(item(hwnd, ID_WORD_KEY), "");
+        fill_suggestions(hwnd, "", None);
+    }
+}
+
+/// Enter in the Words tab's boxes means "Save word" (or nothing, in the
+/// search box) rather than OK.
+fn enter_in_words(hwnd: HWND) -> bool {
+    // SAFETY: plain queries of our own controls.
+    unsafe {
+        let focus = GetFocus();
+        let id = GetDlgCtrlID(focus);
+        // The dropdown's text box is a child of the combo box.
+        let parent = GetParent(focus).map(|p| GetDlgCtrlID(p)).unwrap_or(0);
+        if id == ID_WORD_KEY || parent == ID_WORD_TAMIL {
+            on_word_save(hwnd);
+            true
+        } else {
+            id == ID_WORD_SEARCH
         }
     }
 }
 
 fn on_ok(hwnd: HWND) {
-    let Some((custom, convert, apply)) = WINDOW.with(|w| {
+    let Some((custom, convert, learned, apply)) = WINDOW.with(|w| {
         let w = w.borrow();
         let w = w.as_ref()?;
-        Some((w.hotkey.clone(), w.convert.clone(), w.apply))
+        Some((
+            w.hotkey.clone(),
+            w.convert.clone(),
+            w.learned.clone(),
+            w.apply,
+        ))
     }) else {
         return;
     };
-    match read(hwnd, custom, convert).and_then(|v| apply(&v)) {
+    match read(hwnd, custom, convert, learned).and_then(|v| apply(&v)) {
         // SAFETY: closing our own window.
         Ok(()) => {
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -899,13 +1362,29 @@ unsafe extern "system" fn window_proc(
     match msg {
         WM_COMMAND => {
             match (wparam.0 & 0xFFFF) as i32 {
-                i if i == IDOK.0 => on_ok(hwnd),
+                i if i == IDOK.0 => {
+                    if !enter_in_words(hwnd) {
+                        on_ok(hwnd);
+                    }
+                }
                 // SAFETY: closing our own window.
                 i if i == IDCANCEL.0 => {
                     let _ = unsafe { DestroyWindow(hwnd) };
                 }
                 i if (ID_PRESET..=ID_CUSTOM).contains(&i) => on_shortcut_choice(hwnd, i),
-                ID_FORGET => on_forget(hwnd),
+                ID_WORD_SAVE => on_word_save(hwnd),
+                ID_WORD_REMOVE => on_word_remove(hwnd),
+                ID_WORD_CLEAR => on_word_clear(hwnd),
+                id @ (ID_WORD_SEARCH | ID_WORD_KEY)
+                    if (wparam.0 >> 16) as u32 == EN_CHANGE
+                        && !WINDOW.with(|w| w.borrow().as_ref().is_some_and(|w| w.filling)) =>
+                {
+                    if id == ID_WORD_SEARCH {
+                        refresh_words(hwnd);
+                    } else {
+                        on_word_key_changed(hwnd);
+                    }
+                }
                 ID_CONVERT_ON => {
                     // SAFETY: enabling our own control.
                     unsafe {
@@ -926,6 +1405,14 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: asking our own tab control for its selection.
                 let index = unsafe { SendMessageW(hdr.hwndFrom, TCM_GETCURSEL, None, None).0 };
                 show_page(index.max(0) as usize);
+            } else if hdr.idFrom == ID_WORDS as usize && hdr.code == LVN_ITEMCHANGED {
+                on_word_selected(hwnd);
+            } else if hdr.idFrom == ID_WORDS as usize && hdr.code == LVN_KEYDOWN {
+                // SAFETY: LVN_KEYDOWN comes with an NMLVKEYDOWN.
+                let key = unsafe { &*(lparam.0 as *const NMLVKEYDOWN) };
+                if key.wVKey == VK_DELETE.0 {
+                    on_word_remove(hwnd);
+                }
             } else if hdr.code == NM_CLICK || hdr.code == NM_RETURN {
                 // SAFETY: only our SysLink controls send these to this window.
                 open_link(unsafe { &*(lparam.0 as *const NMLINK) });
@@ -943,7 +1430,7 @@ unsafe extern "system" fn window_proc(
                 SetBkMode(dc, TRANSPARENT);
                 let brush = match GetDlgCtrlID(HWND(lparam.0 as *mut _)) {
                     ID_HOTKEY | ID_CONVERT_KEY => None,
-                    ID_MUTED => {
+                    ID_MUTED | ID_WORD_COUNT => {
                         SetTextColor(dc, COLORREF(GetSysColor(COLOR_GRAYTEXT)));
                         page
                     }
@@ -1052,6 +1539,95 @@ mod tests {
         TranslateMessage,
     };
 
+    /// The Words tab, driven through its controls: selecting a row fills
+    /// the boxes, Save word changes or adds, Remove removes, and OK hands
+    /// the edited list to the app.
+    #[test]
+    fn words_tab_edits_the_list() {
+        thread_local! {
+            static APPLIED: RefCell<Option<Values>> = const { RefCell::new(None) };
+        }
+        fn apply(v: &Values) -> Result<(), String> {
+            APPLIED.with(|a| *a.borrow_mut() = Some(v.clone()));
+            Ok(())
+        }
+        fn suggest(key: &str) -> Vec<String> {
+            match key {
+                "nanri" => vec!["நன்றி".into(), "நண்றி".into()],
+                _ => vec!["கடல்".into(), "காதல்".into()],
+            }
+        }
+        fn closed() {}
+        let pair = |k: &str, w: &str| (k.to_string(), w.to_string());
+        let values = Values {
+            hotkey: "Ctrl+Alt+T".into(),
+            convert_hotkey: String::new(),
+            insert_mode: InsertMode::Unicode,
+            beam: 5,
+            remember_picks: true,
+            theme: Theme::System,
+            autostart: false,
+            learned: vec![
+                pair("amma", "அம்மா"),
+                pair("kadal", "கடல்"),
+                pair("thamil", "தமில்"),
+            ],
+        };
+        open(
+            values,
+            Actions {
+                apply,
+                suggest,
+                on_close: closed,
+            },
+        );
+        let h = hwnd().expect("settings window");
+        let text = |id| text_of(item(h, id));
+        assert_eq!(text(ID_WORD_COUNT), "3 words");
+
+        // Selecting a row fills the boxes; change its spelling.
+        select_word(h, 1);
+        assert_eq!(text(ID_WORD_KEY), "kadal");
+        assert_eq!(text(ID_WORD_TAMIL), "கடல்");
+        fill_text(item(h, ID_WORD_TAMIL), "காதல்");
+        on_word_save(h);
+        assert_eq!(learned_words()[1], pair("kadal", "காதல்"));
+
+        // Typing a new word offers its suggestions; save adds it in order.
+        // SAFETY: setting our own control's text (sends EN_CHANGE).
+        let _ = unsafe { SetWindowTextW(item(h, ID_WORD_KEY), w!("Nanri")) };
+        assert_eq!(text(ID_WORD_TAMIL), "நன்றி");
+        on_word_save(h);
+        assert_eq!(learned_words()[2], pair("nanri", "நன்றி"));
+        assert_eq!(text(ID_WORD_COUNT), "4 words");
+
+        // The saved word is selected; Remove removes it.
+        assert_eq!(selected_words(h), [2]);
+        on_word_remove(h);
+        assert_eq!(text(ID_WORD_COUNT), "3 words");
+
+        // Search filters the list.
+        fill_text(item(h, ID_WORD_SEARCH), "tha");
+        refresh_words(h);
+        assert_eq!(text(ID_WORD_COUNT), "1 of 3");
+
+        // A word that isn't Tamil isn't saved (the warning box is skipped
+        // by checking the rule directly).
+        assert!(!learned::valid("hello", "hello"));
+
+        on_ok(h);
+        let applied = APPLIED.with(|a| a.borrow_mut().take()).expect("applied");
+        assert_eq!(
+            applied.learned,
+            [
+                pair("amma", "அம்மா"),
+                pair("kadal", "காதல்"),
+                pair("thamil", "தமில்")
+            ]
+        );
+        assert!(hwnd().is_none(), "OK closes the window");
+    }
+
     #[test]
     fn recognises_presets_however_written() {
         assert_eq!(preset_index("Ctrl+Alt+T"), Some(0));
@@ -1062,7 +1638,7 @@ mod tests {
 
     /// Opens the window for a few seconds (for screenshots); Cancel or the
     /// timeout closes it. Run with: cargo test -p ezhuthu settings_preview -- --ignored
-    /// (EZHUTHU_PREVIEW_TAB=1 starts on the Shortcuts tab, 2 on About.)
+    /// (EZHUTHU_PREVIEW_TAB=1 starts on the Shortcuts tab, 2 on Words, 3 on About.)
     #[test]
     #[ignore]
     fn settings_preview() {
@@ -1081,22 +1657,27 @@ mod tests {
             remember_picks: true,
             theme: Theme::System,
             autostart: true,
+            learned: vec![
+                ("amma".into(), "அம்மா".into()),
+                ("kadal".into(), "கடல்".into()),
+                ("thamil".into(), "தமில்".into()),
+            ],
         };
-        fn forget() -> Result<(), String> {
-            Ok(())
+        fn suggest(_: &str) -> Vec<String> {
+            vec!["கடல்".into(), "காதல்".into()]
         }
         open(
             values,
             Actions {
                 apply,
-                forget,
+                suggest,
                 on_close: closed,
             },
         );
         let start_tab = std::env::var("EZHUTHU_PREVIEW_TAB")
             .ok()
             .and_then(|t| t.parse::<usize>().ok())
-            .filter(|&t| (1..=2).contains(&t));
+            .filter(|&t| (1..=3).contains(&t));
         if let Some(t) = start_tab {
             show_page(t);
             // SAFETY: selecting the About tab on our own tab control.

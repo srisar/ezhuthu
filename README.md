@@ -67,7 +67,7 @@ Ezhuthu lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray i
 
 The last row is always the word exactly as you typed it, marked **English**: press its number, or ↓ to it and Space.
 
-Ezhuthu remembers your choices. When you insert a suggestion other than the first, it comes first the next time you type that word. Pick the original first suggestion again to undo this. Only the words you picked are kept, in `%APPDATA%\ezhuthu\learned.tsv` on your PC. Turn this off, or forget them all, in Settings.
+Ezhuthu remembers your choices. When you insert a suggestion other than the first, it comes first the next time you type that word. Pick the original first suggestion again to undo this. Only the words you picked are kept, in `%APPDATA%\ezhuthu\learned.tsv` on your PC. See, change, add or remove them on the **Words** tab in Settings, or turn learning off on General.
 
 When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start menu search box.
 
@@ -82,12 +82,13 @@ Right-click the tray icon and choose **Settings...** (launching Ezhuthu again wh
 - **General** sets:
   - suggestions per word;
   - how text is inserted (typing, or pasting for apps that garble typed Tamil);
-  - remembering the suggestions you pick, and forgetting them;
+  - remembering the suggestions you pick;
   - the popup theme: match Windows (default), light or dark;
   - Start with Windows.
 - **Shortcuts** sets:
   - the Tamil mode shortcut (one of four presets, or any custom combination);
   - the convert selection shortcut (or turns it off).
+- **Words** lists the words Ezhuthu has learned, with a search box. Select one to change its Tamil spelling, choosing from the model's suggestions or pasting your own. Type a new word to add it, or remove words. Changes apply when you press OK.
 - **About** shows the version, the source code link and the credits.
 
 Settings are saved in `%APPDATA%\ezhuthu\config.toml`.
