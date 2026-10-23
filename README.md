@@ -12,7 +12,6 @@
 <p align="center">
   <a href="https://github.com/srisar/ezhuthu/releases/latest"><img src="https://img.shields.io/github/v/release/srisar/ezhuthu?label=download" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/srisar/ezhuthu" alt="MIT license"></a>
-  <a href="https://github.com/srisar/ezhuthu/actions/workflows/release.yml"><img src="https://github.com/srisar/ezhuthu/actions/workflows/release.yml/badge.svg" alt="Release build"></a>
 </p>
 
 Ezhuthu is a free, open-source Tamil phonetic keyboard for Windows. Press a shortcut to turn on Tamil mode, type words the way they sound, and pick from the suggestions that appear at your cursor. It's a small native tray app. The [AI4Bharat IndicXlit](https://github.com/AI4Bharat/IndicXlit) transliteration model runs on your PC, so it works offline and nothing you type leaves your computer.
