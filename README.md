@@ -1,68 +1,120 @@
-# ezhuthu (எழுத்து)
+<p align="center">
+  <img src="crates/app/icons/ezhuthu.svg" width="112" alt="Ezhuthu logo">
+</p>
 
-Tamil phonetic input for Windows. Type `natchathiram`, get நட்சத்திரம். It is a small native Win32 tray app (Rust) that runs the AI4Bharat IndicXlit transliteration model locally, with an optional on-demand refine pass via Claude.
+<h1 align="center">Ezhuthu (எழுத்து)</h1>
 
-The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
+<p align="center">
+  <strong>Type Tamil in English letters, in any Windows app.</strong><br>
+  Type <code>natchathiram</code>, get நட்சத்திரம்.
+</p>
 
-## Status
+<p align="center">
+  <a href="https://github.com/srisar/ezhuthu/releases/latest"><img src="https://img.shields.io/github/v/release/srisar/ezhuthu?label=download" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/srisar/ezhuthu" alt="MIT license"></a>
+</p>
 
-| Phase | State |
-|---|---|
-| 0: environment check | done |
-| 1: model export and parity (`tools/export/`) | done: ONNX matches PyTorch, which matches fairseq, on all test words |
-| 2: `xlit` crate and `xlit-cli` (`crates/xlit`) | done: tract, KV-cached decoder, exact top-5 parity with Python |
-| 3: tray app (`crates/app`) | done: tested in Notepad, Chrome, Word, VS Code; Windows search box not yet tried |
-| 4: refine (Ctrl+R) | deferred |
-| 5: polish | per-user installer, Settings window, Start with Windows done |
+Ezhuthu is a free, open-source Tamil phonetic keyboard for Windows. Press a shortcut to turn on Tamil mode, type words the way they sound, and pick from the suggestions that appear at your cursor. It's a small native tray app. The [AI4Bharat IndicXlit](https://github.com/AI4Bharat/IndicXlit) transliteration model runs on your PC, so it works offline and nothing you type leaves your computer.
+
+## Features
+
+- **Works everywhere:** Notepad, Word, browsers, VS Code, chat apps and the Start menu search box.
+- **Suggestions at the cursor:** up to 9 Tamil candidates per word, ranked by how common each word is. Pick one with a number or the arrow keys.
+- **English when you need it:** the last suggestion is always the word exactly as you typed it, so a few English words don't need a mode switch.
+- **One shortcut:** Ctrl+Alt+T by default. Choose a preset or any combination in Settings.
+- **Private and offline:** no internet, no account. Password fields are never touched.
+- **Lightweight:** installs per user with no administrator rights, and starts with Windows if you like.
 
 ## Install
 
-Download `ezhuthu-setup-<version>.exe` from the [latest release](https://github.com/srisar/ezhuthu/releases/latest) and run it. It installs for the current user only, with no administrator rights. The setup window shows the install folder, by default `%LOCALAPPDATA%\Programs\ezhuthu`. Use **Browse…** to pick another location (an `ezhuthu` folder is created there) or type a path. Setup then:
-- restricts the install folder so only you, SYSTEM and Administrators can change it. A drive without permissions (FAT32/exFAT) is refused;
-- adds a Start Menu shortcut;
-- adds an entry in **Settings > Apps**, whose uninstall runs `ezhuthu.exe --uninstall`;
-- sets **Start with Windows** if its checkbox is ticked (you can change it later in **Settings**);
-- starts the app.
+Requires Windows 10 or 11 (64-bit).
 
-Running a newer setup updates an existing install in place, and settings in `%APPDATA%\ezhuthu` are kept. Uninstall deletes only ezhuthu's own files (a fixed list built into the program, after checking for links), so anything else in the folder is left alone. Unattended install: `ezhuthu-setup.exe --silent [--dir <folder>] [--autostart] [--no-launch]`. The setup isn't code-signed yet, so Windows SmartScreen may warn the first time. Choose **More info > Run anyway**.
+1. Download `ezhuthu-setup-<version>.exe` from the [latest release](https://github.com/srisar/ezhuthu/releases/latest).
+2. Run it. The setup isn't code-signed yet, so Windows SmartScreen may warn the first time. Choose **More info > Run anyway**.
+3. Keep the default folder (`%LOCALAPPDATA%\Programs\ezhuthu`) or **Browse…** to another, choose whether to start with Windows, and click **Install**.
 
-To build the installer (after `tools/fetch-assets.sh`):
+Setup adds a Start Menu shortcut and an entry in **Settings > Apps**, then starts Ezhuthu in the tray. Running a newer setup updates in place and keeps your settings. To uninstall, use **Settings > Apps > Ezhuthu > Uninstall**.
 
-```bash
-tools/build-installer.sh   # -> dist/ezhuthu-setup-<version>.exe
-```
+<details>
+<summary>Install details</summary>
 
-It is a single self-contained file: the release `ezhuthu.exe` plus the model assets.
+- Setup restricts the install folder so only you, SYSTEM and Administrators can change it. A drive without permissions (FAT32/exFAT) is refused.
+- Uninstall runs `ezhuthu.exe --uninstall` and deletes only Ezhuthu's own files (a fixed list built into the program, after checking for links), so anything else in the folder is left alone. Settings in `%APPDATA%\ezhuthu` are kept.
+- Unattended install: `ezhuthu-setup.exe --silent [--dir <folder>] [--autostart] [--no-launch]`.
 
-To publish a release, bump `version` in `Cargo.toml`, merge to main, then run `tools/release.sh` from an up-to-date main. It tags `v<version>` and pushes the tag. GitHub Actions ([`release.yml`](.github/workflows/release.yml)) then checks formatting, lints and tests on Windows, builds the installer and creates the GitHub release with the installer and its SHA-256. `--dry-run` runs only the local checks. To rebuild an existing tag, use **Actions > Release > Run workflow**: it keeps the installer as a workflow artifact, or replaces the release files if **publish** is ticked.
+</details>
 
-## The app
+## Using Ezhuthu
 
-```bash
-tools/fetch-assets.sh
-cargo build --release -p ezhuthu
-./target/release/ezhuthu.exe
-```
-
-`ezhuthu.exe` lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray icon is blue when it's on and grey when it's off. While it's on, type Tamil in English letters in any app, a word at a time. A popup at the caret shows the candidates:
+Ezhuthu lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray icon shows the Ezhuthu logo when it's on and turns grey when it's off. While it's on, type Tamil in English letters, a word at a time. A popup at the cursor shows the suggestions:
 
 | Key (while a word is in progress) | Action |
 |---|---|
 | Space | insert the chosen Tamil word and a space |
 | Enter | insert the chosen word without a space |
-| 1–5 | insert that candidate and a space (the last row inserts the word as typed, in English) |
-| ↑ / ↓ | choose a candidate |
+| 1–9 (0 for a tenth row) | insert that suggestion and a space |
+| ↑ / ↓ | choose a suggestion |
 | Backspace / Ctrl+Backspace | delete a letter / drop the word |
 | Esc | drop the word |
 | any other key (Tab, arrows, Ctrl+S…) | insert the word, then the key does its usual job |
 
-The last row of the popup is always the word exactly as you typed it, marked **English**, so a few English words don't need a mode switch: press its number, or ↓ to it and Space. With 9 suggestions per word it is the tenth row, picked with 0.
+The last row is always the word exactly as you typed it, marked **English**: press its number, or ↓ to it and Space.
 
-When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start/search box.
+When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start menu search box.
 
-Change settings from the tray menu: **Settings...** has two tabs. **General** sets the Tamil-mode shortcut (one of four presets, or any custom combination), suggestions per word, how text is inserted (typing, or pasting for apps that garble typed Tamil) and Start with Windows. **About** shows the version and credits for the model and libraries. Launching ezhuthu again while it is running also opens Settings. They are saved in `%APPDATA%\ezhuthu\config.toml`. The app looks for model files in `assets/` next to the exe. Dev builds (`dev` and `fast` profiles) also look in the workspace `assets/`.
+### Settings
 
-## Transliteration library and CLI (Rust)
+Right-click the tray icon and choose **Settings...** (launching Ezhuthu again while it's running also opens it).
+
+- **General** sets:
+  - the Tamil mode shortcut (one of four presets, or any custom combination);
+  - suggestions per word;
+  - how text is inserted (typing, or pasting for apps that garble typed Tamil);
+  - Start with Windows.
+- **About** shows the version, the source code link and the credits.
+
+Settings are saved in `%APPDATA%\ezhuthu\config.toml`.
+
+## Development
+
+Ezhuthu is written in Rust with plain Win32 (the `windows` crate). There are no web or GUI frameworks. The workspace:
+
+| Crate | What it is |
+|---|---|
+| `crates/xlit` | `ezhuthu-xlit`: model loading, beam search and word-frequency rescoring on [tract](https://github.com/sonos/tract), plus `xlit-cli` |
+| `crates/app` | `ezhuthu.exe`: the tray app, keyboard hook, popup and Settings window |
+| `crates/install` | install, uninstall and autostart logic shared by the app and setup |
+| `crates/setup` | `ezhuthu-setup.exe`: the installer, with the app and model embedded |
+| `tools/` | asset fetch, installer and release scripts; Python model export and icon tools |
+
+The design notes and the original plan are in [HANDOFF.md](HANDOFF.md).
+
+### Build and run
+
+```bash
+tools/fetch-assets.sh            # model files into assets/ (needs the GitHub CLI, signed in)
+cargo build --release -p ezhuthu
+./target/release/ezhuthu.exe
+```
+
+The release profile uses LTO with `codegen-units = 1`, so the first release build takes several minutes. For quicker iterations, use `cargo build --profile fast -p ezhuthu` (optimized, no LTO, with a console window for logs). The app looks for model files in `assets/` next to the exe. Dev builds (`dev` and `fast` profiles) also look in the workspace `assets/`.
+
+### Installer and releases
+
+```bash
+tools/build-installer.sh   # -> dist/ezhuthu-setup-<version>.exe
+```
+
+The installer is a single self-contained file: the release `ezhuthu.exe` plus the model assets.
+
+To publish a release:
+1. Bump `version` in `Cargo.toml` and merge to main.
+2. Run `tools/release.sh` from an up-to-date main. It tags `v<version>` and pushes the tag; `--dry-run` runs only the local checks.
+3. GitHub Actions ([`release.yml`](.github/workflows/release.yml)) checks formatting, lints and tests on Windows, builds the installer and creates the GitHub release with the installer and its SHA-256.
+
+To rebuild an existing tag, use **Actions > Release > Run workflow**. It keeps the installer as a workflow artifact, or replaces the release files if **publish** is ticked.
+
+### Transliteration library and CLI (Rust)
 
 `crates/xlit` (`ezhuthu-xlit`) is pure Rust: ONNX runs on [tract](https://github.com/sonos/tract), with no DLLs. It needs the exported assets in `assets/` (see below).
 
@@ -74,9 +126,7 @@ cargo test --release -p ezhuthu-xlit
 
 The tests check the §8 acceptance words (each expected word in the top 5) and exact top-5 parity with the Python reference on `tests/golden_top5.tsv`. To regenerate that file after re-exporting, run `uv run python xlit_ref.py --golden ../../tests/parity_words.txt > ../../tests/golden_top5.tsv` from `tools/export`.
 
-The release profile uses LTO with `codegen-units = 1`, so the first release build takes several minutes.
-
-## Model export (one-time, Python)
+### Model export (one-time, Python)
 
 Python is used only to produce the ONNX assets and is never shipped. You need [uv](https://docs.astral.sh/uv/). Python 3.10 is pinned in `tools/export/.python-version`.
 
@@ -97,7 +147,7 @@ uv run python export_onnx.py
 uv run python parity.py
 ```
 
-### Verifying against fairseq (optional)
+#### Verifying against fairseq (optional)
 
 `fairseq_check.py` runs the checkpoint through real fairseq 0.12.2 so you can diff its output against `xlit_ref.py`. fairseq's C++ extensions don't build here, but generation doesn't need them, so it runs from the unpacked sdist in a throwaway venv:
 
@@ -116,7 +166,7 @@ uv run python xlit_ref.py $(cut -f1 ../../tests/words.tsv) > work/ref_out.txt
 diff work/fairseq_out.txt work/ref_out.txt && echo identical
 ```
 
-## Assets
+### Assets
 
 Model files are never committed. `assets/` is gitignored. To get the files, run:
 
@@ -124,7 +174,7 @@ Model files are never committed. `assets/` is gitignored. To get the files, run:
 tools/fetch-assets.sh
 ```
 
-This downloads the `assets-v1` GitHub Release (about 58 MB) with `gh` and verifies it against `tools/assets.sha256`. You need `gh auth login` while the repository is private. [assets/README.md](assets/README.md) lists the files.
+This downloads the `assets-v1` GitHub Release (about 58 MB) with `gh` and verifies it against `tools/assets.sha256`. You need the GitHub CLI, signed in (`gh auth login`). [assets/README.md](assets/README.md) lists the files.
 
 To rebuild the word-frequency dictionary from upstream, run these from `tools/export`. `fetch` downloads only the 105 MB Tamil entry of the 850 MB zip.
 
@@ -135,7 +185,7 @@ uv run python word_freq.py build --top 500000
 
 If you rebuild any asset, update `tools/assets.sha256` and publish a new release tag.
 
-## Icons
+### Icons
 
 The app and tray icons are committed in `crates/app/icons/`, and the build scripts link them into `ezhuthu.exe` and `ezhuthu-setup.exe` without a resource compiler. The mark is எ followed by a text cursor on a dark tile; the "off" tray icon is the letter on grey. `ezhuthu.svg` is the vector master. To redraw them, run this from `tools/icons` (the font is only needed here, never shipped):
 
@@ -146,11 +196,15 @@ uv run make_icons.py "work/AnekTamil[wdth,wght].ttf" ../../crates/app/icons --pr
 
 The letter's outline comes from Anek Tamil ExtraBold (SIL Open Font License 1.1).
 
-## Model source and license
+## Credits
 
-- Model: [AI4Bharat IndicXlit](https://github.com/AI4Bharat/IndicXlit), checkpoint `indicxlit-en-indic-v1.0`. Madhani et al., *Aksharantar: Open Indic-language Transliteration datasets and models for the Next Billion Users* (2022).
-- License: **MIT**, covering both code and models ("The IndicXlit code (and models) are released under the MIT License"; LICENSE: Copyright (c) 2022 AI4Bhārat).
+- **Transliteration model:** [IndicXlit](https://github.com/AI4Bharat/IndicXlit) by AI4Bharat, checkpoint `indicxlit-en-indic-v1.0`. MIT license, covering both code and models. Madhani et al., *Aksharantar: Open Indic-language Transliteration datasets and models for the Next Billion Users* (2022).
+- **Word frequencies:** IndicXlit word-probability data by AI4Bharat (MIT).
+- **Model runtime:** [tract](https://github.com/sonos/tract) by Sonos (MIT / Apache-2.0).
+- **Logo letter:** [Anek Tamil](https://fonts.google.com/specimen/Anek+Tamil) by Ek Type (SIL Open Font License 1.1).
 
 ## License
 
-Ezhuthu is free and open source under the [MIT License](LICENSE). The model, word data, tract and Anek Tamil keep their own licenses (listed above and in Settings > About).
+Ezhuthu is free and open source under the [MIT License](LICENSE). The model, word data, tract and Anek Tamil keep their own licenses, listed above.
+
+<p align="center">Built by <a href="https://gravitide.dev">Gravitide</a> from Sri Lanka with Love ❤️</p>
