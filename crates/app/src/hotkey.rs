@@ -43,30 +43,13 @@ impl Hotkey {
         Ok(Self { modifiers, vk })
     }
 
-    /// From the Windows hotkey control's value (HKM_GETHOTKEY: low byte the
-    /// virtual key, high byte HOTKEYF_SHIFT=1 / CONTROL=2 / ALT=4 / EXT=8).
-    /// None if there is no modifier or the key has no name we can store.
-    pub fn from_control(value: u16) -> Option<Self> {
-        let (vk, flags) = ((value & 0xFF) as u32, (value >> 8) as u32);
-        let mut modifiers = 0;
-        for (flag, modifier) in [(1, MOD_SHIFT), (2, MOD_CONTROL), (4, MOD_ALT)] {
-            if flags & flag != 0 {
-                modifiers |= modifier;
-            }
-        }
-        (modifiers != 0 && key_name(vk).is_some()).then_some(Self { modifiers, vk })
-    }
-
-    /// Value for the hotkey control. None for Win combinations, which the
-    /// control can't show.
-    pub fn to_control(self) -> Option<u16> {
-        if self.modifiers & MOD_WIN != 0 {
-            return None;
-        }
-        let flags = (self.modifiers & MOD_SHIFT != 0) as u16
-            | ((self.modifiers & MOD_CONTROL != 0) as u16) << 1
-            | ((self.modifiers & MOD_ALT != 0) as u16) << 2;
-        Some(flags << 8 | self.vk as u16)
+    /// A combination pressed in the Settings window's key box: `modifiers`
+    /// (MOD_* bits) held while `vk` went down. Needs Ctrl, Alt or Win (Shift
+    /// alone would turn ordinary capital letters into the toggle) and a key
+    /// we can store by name. Ctrl+Space and friends are fine.
+    pub fn from_keys(modifiers: u32, vk: u32) -> Option<Self> {
+        let strong = modifiers & (MOD_CONTROL | MOD_ALT | MOD_WIN) != 0;
+        (strong && key_name(vk).is_some()).then_some(Self { modifiers, vk })
     }
 }
 
@@ -138,21 +121,37 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_through_text_and_the_hotkey_control() {
-        for s in ["Ctrl+Alt+T", "Ctrl+Shift+F5", "Alt+Space", "Ctrl+1"] {
-            let h = Hotkey::parse(s).unwrap();
-            assert_eq!(h.to_string(), s);
-            assert_eq!(Hotkey::from_control(h.to_control().unwrap()), Some(h));
+    fn round_trips_through_text() {
+        for s in [
+            "Ctrl+Alt+T",
+            "Ctrl+Space",
+            "Ctrl+Shift+F5",
+            "Alt+Space",
+            "Ctrl+1",
+            "Win+Enter",
+        ] {
+            assert_eq!(Hotkey::parse(s).unwrap().to_string(), s);
         }
-        // Ctrl+Alt+T as the control reports it: HOTKEYF_CONTROL | HOTKEYF_ALT, 'T'
+    }
+
+    #[test]
+    fn captures_pressed_combinations() {
+        let ctrl_space = Hotkey::from_keys(MOD_CONTROL, 0x20).unwrap();
+        assert_eq!(ctrl_space.to_string(), "Ctrl+Space");
         assert_eq!(
-            Hotkey::parse("Ctrl+Alt+T").unwrap().to_control(),
-            Some(0x0654)
+            Hotkey::from_keys(MOD_ALT | MOD_SHIFT, 0x09)
+                .unwrap()
+                .to_string(),
+            "Alt+Shift+Tab"
         );
-        assert_eq!(Hotkey::parse("Win+Shift+T").unwrap().to_control(), None);
-        assert_eq!(Hotkey::from_control(b'T' as u16), None, "no modifier");
+        assert_eq!(Hotkey::from_keys(0, b'T' as u32), None, "no modifier");
         assert_eq!(
-            Hotkey::from_control(0x0200 | 0xBC),
+            Hotkey::from_keys(MOD_SHIFT, b'T' as u32),
+            None,
+            "Shift alone types capitals"
+        );
+        assert_eq!(
+            Hotkey::from_keys(MOD_CONTROL, 0xBC),
             None,
             "comma has no stored name"
         );

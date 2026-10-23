@@ -14,27 +14,30 @@ use windows::Win32::Graphics::Gdi::{
     TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    BST_CHECKED, BST_UNCHECKED, CheckDlgButton, HKCOMB_NONE, HKCOMB_S, HKM_GETHOTKEY,
-    HKM_SETHOTKEY, HKM_SETRULES, HOTKEY_CLASSW, HOTKEYF_ALT, HOTKEYF_CONTROL, ICC_HOTKEY_CLASS,
-    INITCOMMONCONTROLSEX, InitCommonControlsEx, IsDlgButtonChecked,
+    BST_CHECKED, BST_UNCHECKED, CheckDlgButton, IsDlgButtonChecked,
 };
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForSystem, SystemParametersInfoForDpi,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, SetFocus, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING,
-    CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    GetDlgItem, HMENU, IDC_ARROW, IDCANCEL, IDOK, LoadCursorW, MB_ICONWARNING, MB_OK, MessageBoxW,
-    NONCLIENTMETRICSW, RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_SHOW, SendMessageW,
-    SetForegroundWindow, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_SETFONT, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
-    WS_GROUP, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, DLGC_WANTALLKEYS,
+    DefWindowProcW, DestroyWindow, ES_READONLY, GetDlgItem, HMENU, IDC_ARROW, IDCANCEL, IDOK,
+    LoadCursorW, MB_ICONWARNING, MB_OK, MessageBoxW, NONCLIENTMETRICSW, RegisterClassExW,
+    SPI_GETNONCLIENTMETRICS, SW_SHOW, SendMessageW, SetForegroundWindow, SetWindowTextW,
+    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_SETFONT, WM_SYSCHAR, WM_SYSKEYDOWN, WNDCLASSEXW,
+    WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_GROUP, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::config::InsertMode;
-use crate::hotkey::Hotkey;
+use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::win::instance;
 
 const ID_HOTKEY: i32 = 10;
@@ -59,7 +62,8 @@ pub type Apply = fn(&Values) -> Result<(), String>;
 struct Window {
     hwnd: HWND,
     font: HFONT,
-    initial: Values,
+    /// The combination shown in the key box (updated as keys are pressed).
+    hotkey: String,
     apply: Apply,
     on_close: fn(),
 }
@@ -91,11 +95,6 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
     // SAFETY: standard window creation on the UI thread; all strings outlive
     // the calls that use them; the font is deleted in WM_DESTROY.
     unsafe {
-        let icc = INITCOMMONCONTROLSEX {
-            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_HOTKEY_CLASS,
-        };
-        let _ = InitCommonControlsEx(&icc);
         let class = w!("ezhuthu.settings");
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -198,17 +197,20 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             -1,
             (16, 18, 150, 20),
         )?;
+        // A read-only edit that records the pressed combination (the stock
+        // hotkey control refuses Space, so Ctrl+Space couldn't be chosen).
         let hotkey = child(
-            HOTKEY_CLASSW,
-            "",
-            tab,
+            w!("EDIT"),
+            &values.hotkey,
+            tab | ES_READONLY as u32,
             WS_EX_CLIENTEDGE,
             ID_HOTKEY,
             (170, 14, 180, 26),
         )?;
+        let _ = SetWindowSubclass(hotkey, Some(key_box_proc), 1, 0);
         child(
             w!("STATIC"),
-            "Click the box, then press the new keys.",
+            "Click the box, then press the keys, e.g. Ctrl+Space.",
             0,
             none,
             -1,
@@ -282,22 +284,6 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
         )?;
 
         // Current values.
-        // Rules: a bare key or Shift+key is invalid; the control turns it into Ctrl+Alt+key.
-        SendMessageW(
-            hotkey,
-            HKM_SETRULES,
-            Some(WPARAM((HKCOMB_NONE | HKCOMB_S) as usize)),
-            Some(LPARAM((HOTKEYF_CONTROL | HOTKEYF_ALT) as isize)),
-        );
-        let control_value = Hotkey::parse(&values.hotkey)
-            .ok()
-            .and_then(Hotkey::to_control);
-        SendMessageW(
-            hotkey,
-            HKM_SETHOTKEY,
-            Some(WPARAM(control_value.unwrap_or(0) as usize)),
-            None,
-        );
         let radio = if values.insert_mode == InsertMode::Clipboard {
             ID_PASTE
         } else {
@@ -331,7 +317,7 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             *cell.borrow_mut() = Some(Window {
                 hwnd,
                 font,
-                initial: values,
+                hotkey: values.hotkey.clone(),
                 apply,
                 on_close,
             });
@@ -355,30 +341,11 @@ fn warn(hwnd: HWND, text: &str) {
     }
 }
 
-/// Reads the controls into `Values`; Err(message) for an unusable hotkey.
-fn read(hwnd: HWND, initial: &Values) -> Result<Values, String> {
+/// Reads the controls into `Values`.
+fn read(hwnd: HWND, hotkey: String) -> Values {
     // SAFETY: reading our own controls.
     unsafe {
         let item = |id| GetDlgItem(Some(hwnd), id).unwrap_or_default();
-        let value = SendMessageW(item(ID_HOTKEY), HKM_GETHOTKEY, None, None).0 as u16;
-        let initial_value = Hotkey::parse(&initial.hotkey)
-            .ok()
-            .and_then(Hotkey::to_control);
-        // Untouched (or a Win combination the control can't show): keep it.
-        let hotkey = if value == 0 || Some(value) == initial_value {
-            initial.hotkey.clone()
-        } else {
-            match Hotkey::from_control(value) {
-                Some(h) => h.to_string(),
-                None => {
-                    return Err(
-                        "Use Ctrl, Alt or Shift together with a letter, digit, F-key, \
-                                Space, Enter or Tab."
-                            .into(),
-                    );
-                }
-            }
-        };
         let insert_mode = if IsDlgButtonChecked(hwnd, ID_PASTE) == BST_CHECKED.0 {
             InsertMode::Clipboard
         } else {
@@ -389,23 +356,22 @@ fn read(hwnd: HWND, initial: &Values) -> Result<Values, String> {
             .max(0) as usize;
         let beam = (BEAM_CHOICES.start() + index).min(*BEAM_CHOICES.end());
         let autostart = IsDlgButtonChecked(hwnd, ID_AUTOSTART) == BST_CHECKED.0;
-        Ok(Values {
+        Values {
             hotkey,
             insert_mode,
             beam,
             autostart,
-        })
+        }
     }
 }
 
 fn on_ok(hwnd: HWND) {
-    let Some((initial, apply)) =
-        WINDOW.with(|w| w.borrow().as_ref().map(|w| (w.initial.clone(), w.apply)))
+    let Some((hotkey, apply)) =
+        WINDOW.with(|w| w.borrow().as_ref().map(|w| (w.hotkey.clone(), w.apply)))
     else {
         return;
     };
-    let result = read(hwnd, &initial).and_then(|values| apply(&values));
-    match result {
+    match apply(&read(hwnd, hotkey)) {
         // SAFETY: closing our own window.
         Ok(()) => {
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -457,6 +423,64 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+fn held(vk: u16) -> bool {
+    // SAFETY: plain query of this thread's keyboard state.
+    (unsafe { GetKeyState(vk as i32) }) < 0
+}
+
+/// The hotkey box: records the combination pressed while it has focus.
+unsafe extern "system" fn key_box_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    match msg {
+        // With Ctrl or Alt held, every key comes here (Ctrl+Tab, Ctrl+Enter,
+        // Alt+Space…); plain Tab, Enter and Esc still move focus or close.
+        WM_GETDLGCODE if held(VK_CONTROL.0) || held(VK_MENU.0) => {
+            return LRESULT(DLGC_WANTALLKEYS as isize);
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            record(hwnd, wparam.0 as u32);
+            return LRESULT(0);
+        }
+        // Nothing is typed into the box, and Alt+Space doesn't open the menu.
+        WM_CHAR | WM_SYSCHAR => return LRESULT(0),
+        _ => {}
+    }
+    // SAFETY: default processing by the edit control.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// Shows and remembers `vk` with the modifiers held, if it makes a usable hotkey.
+fn record(key_box: HWND, vk: u32) {
+    let mut modifiers = 0;
+    for (vks, bit) in [
+        (&[VK_CONTROL][..], MOD_CONTROL),
+        (&[VK_MENU][..], MOD_ALT),
+        (&[VK_SHIFT][..], MOD_SHIFT),
+        (&[VK_LWIN, VK_RWIN][..], MOD_WIN),
+    ] {
+        if vks.iter().any(|k| held(k.0)) {
+            modifiers |= bit;
+        }
+    }
+    let Some(hotkey) = Hotkey::from_keys(modifiers, vk) else {
+        return; // a lone modifier, a bare key, or a key we can't store
+    };
+    let text = hotkey.to_string();
+    // SAFETY: updating our own edit control.
+    let _ = unsafe { SetWindowTextW(key_box, &HSTRING::from(text.as_str())) };
+    WINDOW.with(|w| {
+        if let Some(w) = w.borrow_mut().as_mut() {
+            w.hotkey = text;
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,7 +510,7 @@ mod tests {
         open(values, apply, closed);
         // SAFETY: a plain message loop with a timer that closes the window.
         unsafe {
-            let timer = SetTimer(None, 0, 6000, None);
+            let timer = SetTimer(None, 0, 12000, None);
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 // Only our own timer (controls such as the hotkey box run their own).
