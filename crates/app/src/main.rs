@@ -14,6 +14,7 @@ mod engine;
 mod focus;
 mod hotkey;
 mod insert;
+mod learned;
 mod popup;
 mod settings;
 mod tray;

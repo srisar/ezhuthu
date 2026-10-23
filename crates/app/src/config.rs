@@ -20,6 +20,8 @@ pub struct Config {
     pub hotkey: String,
     pub insert_mode: InsertMode,
     pub beam: usize,
+    /// Learn the suggestions the user picks (see `learned`).
+    pub remember_picks: bool,
     pub assets_dir: Option<PathBuf>,
 }
 
@@ -29,6 +31,7 @@ impl Default for Config {
             hotkey: "Ctrl+Alt+T".into(),
             insert_mode: InsertMode::Unicode,
             beam: ezhuthu_xlit::DEFAULT_BEAM,
+            remember_picks: true,
             assets_dir: None,
         }
     }
@@ -86,11 +89,16 @@ impl Config {
              # Suggestions per word (beam size). Higher is slower.\n\
              beam = {}\n\
              \n\
+             # Show the suggestion you picked for a word first next time\n\
+             # (kept in learned.tsv next to this file).\n\
+             remember_picks = {}\n\
+             \n\
              # Folder with the model files. Default: \"assets\" next to ezhuthu.exe.\n\
              {assets}",
             quote(&self.hotkey),
             quote(mode),
             self.beam,
+            self.remember_picks,
         )
     }
 
@@ -157,6 +165,7 @@ mod tests {
             hotkey: "Ctrl+Shift+F5".into(),
             insert_mode: InsertMode::Clipboard,
             beam: 7,
+            remember_picks: false,
             assets_dir: Some(PathBuf::from(r#"D:\it's "odd"\assets"#)),
         };
         assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
