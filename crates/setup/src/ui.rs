@@ -117,14 +117,19 @@ pub fn run(path: &Path, updating: bool, autostart: bool) -> Result<Option<Choice
             dpi,
         );
         let font = CreateFontIndirectW(&ncm.lfMessageFont);
+        // The app name at the top: the message font, bold and half as large again.
+        let mut title_lf = ncm.lfMessageFont;
+        title_lf.lfHeight = title_lf.lfHeight * 3 / 2;
+        title_lf.lfWeight = 700;
+        let title_font = CreateFontIndirectW(&title_lf);
 
-        // Client area 480 x 232 (96-DPI units), centred on the primary monitor.
+        // Client area 480 x 256 (96-DPI units), centred on the primary monitor.
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
         let mut r = RECT {
             left: 0,
             top: 0,
             right: s(480),
-            bottom: s(232),
+            bottom: s(256),
         };
         let _ = AdjustWindowRectExForDpi(&mut r, style, false, WINDOW_EX_STYLE(0), dpi);
         let (w, h) = (r.right - r.left, r.bottom - r.top);
@@ -188,15 +193,51 @@ pub fn run(path: &Path, updating: bool, autostart: bool) -> Result<Option<Choice
             ctl
         };
         let none = WINDOW_EX_STYLE(0);
-        let heading = format!("ezhuthu {} — Tamil phonetic input", crate::VERSION);
-        child(w!("STATIC"), &heading, 0, none, -1, (16, 16, 448, 20))?;
+        // The app icon (resource 1, linked in by build.rs) beside the title,
+        // loaded at the exact size so no scaling blurs it.
+        const SS_ICON: u32 = 0x3;
+        const SS_REALSIZECONTROL: u32 = 0x40;
+        let logo = child(
+            w!("STATIC"),
+            "",
+            SS_ICON | SS_REALSIZECONTROL,
+            none,
+            -1,
+            (16, 14, 40, 40),
+        )?;
+        let logo_icon = windows::Win32::UI::WindowsAndMessaging::LoadImageW(
+            Some(instance.into()),
+            PCWSTR(1 as _),
+            windows::Win32::UI::WindowsAndMessaging::IMAGE_ICON,
+            s(40),
+            s(40),
+            windows::Win32::UI::WindowsAndMessaging::LR_DEFAULTCOLOR,
+        )
+        .ok();
+        if let Some(icon) = logo_icon {
+            SendMessageW(
+                logo,
+                windows::Win32::UI::WindowsAndMessaging::STM_SETICON,
+                Some(WPARAM(icon.0 as usize)),
+                None,
+            );
+        }
+        let title = child(w!("STATIC"), "Ezhuthu", 0, none, -1, (66, 10, 398, 30))?;
+        SendMessageW(
+            title,
+            WM_SETFONT,
+            Some(WPARAM(title_font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+        let subtitle = format!("Version {} · Tamil phonetic input", crate::VERSION);
+        child(w!("STATIC"), &subtitle, 0, none, -1, (66, 40, 398, 20))?;
         child(
             w!("STATIC"),
             "Install folder:",
             0,
             none,
             -1,
-            (16, 48, 448, 18),
+            (16, 76, 448, 18),
         )?;
         let edit = child(
             w!("EDIT"),
@@ -204,7 +245,7 @@ pub fn run(path: &Path, updating: bool, autostart: bool) -> Result<Option<Choice
             (WS_TABSTOP.0 | ES_AUTOHSCROLL as u32) & !WS_BORDER.0,
             WS_EX_CLIENTEDGE,
             ID_PATH,
-            (16, 68, 360, 24),
+            (16, 96, 360, 24),
         )?;
         let browse = child(
             w!("BUTTON"),
@@ -212,23 +253,23 @@ pub fn run(path: &Path, updating: bool, autostart: bool) -> Result<Option<Choice
             WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
             none,
             ID_BROWSE,
-            (384, 67, 80, 26),
+            (384, 95, 80, 26),
         )?;
         let note = if updating {
-            "ezhuthu is already installed here and will be updated. To install it \
+            "Ezhuthu is already installed here and will be updated. To install it \
              somewhere else, uninstall it first (Settings > Apps)."
         } else {
             "Browse to choose another location; a folder named \"ezhuthu\" is created \
              there. No administrator rights are needed."
         };
-        child(w!("STATIC"), note, 0, none, -1, (16, 100, 448, 36))?;
+        child(w!("STATIC"), note, 0, none, -1, (16, 128, 448, 36))?;
         child(
             w!("BUTTON"),
-            "Start ezhuthu when I sign in to Windows",
+            "Start Ezhuthu when I sign in to Windows",
             WS_TABSTOP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_AUTOSTART,
-            (16, 144, 448, 22),
+            (16, 172, 448, 22),
         )?;
         let ok_label = if updating { "Update" } else { "Install" };
         child(
@@ -237,7 +278,7 @@ pub fn run(path: &Path, updating: bool, autostart: bool) -> Result<Option<Choice
             WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
             none,
             IDOK.0,
-            (296, 188, 80, 28),
+            (296, 216, 80, 28),
         )?;
         child(
             w!("BUTTON"),
@@ -245,7 +286,7 @@ pub fn run(path: &Path, updating: bool, autostart: bool) -> Result<Option<Choice
             WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
             none,
             IDCANCEL.0,
-            (384, 188, 80, 28),
+            (384, 216, 80, 28),
         )?;
         let _ = CheckDlgButton(
             hwnd,
@@ -280,6 +321,12 @@ pub fn run(path: &Path, updating: bool, autostart: bool) -> Result<Option<Choice
         }
         let state = STATE.with(|st| st.borrow_mut().take());
         let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = DeleteObject(HGDIOBJ(title_font.0));
+        if let Some(icon) = logo_icon {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(
+                windows::Win32::UI::WindowsAndMessaging::HICON(icon.0),
+            );
+        }
         Ok(state.and_then(|s| s.choice))
     }
 }
@@ -346,7 +393,7 @@ fn on_install(hwnd: HWND, updating: bool) {
             && message(
                 hwnd,
                 &format!(
-                    "{} already contains other files.\n\nInstall ezhuthu in its own folder, {}?",
+                    "{} already contains other files.\n\nInstall Ezhuthu in its own folder, {}?",
                     dir.display(),
                     sub.display()
                 ),
@@ -377,7 +424,7 @@ fn on_install(hwnd: HWND, updating: bool) {
             hwnd,
             &format!(
                 "{} is outside your user folder.\n\nDepending on how this PC is set up, other \
-                 accounts may be able to replace ezhuthu's files there, and ezhuthu runs as \
+                 accounts may be able to replace Ezhuthu's files there, and Ezhuthu runs as \
                  you. The default location inside your user folder is safer.\n\n\
                  Install here anyway?",
                 dir.display()
@@ -391,7 +438,7 @@ fn on_install(hwnd: HWND, updating: bool) {
         message(
             hwnd,
             &format!(
-                "ezhuthu can't be installed in {}:\n{e:#}\n\nChoose a folder you can write to, \
+                "Ezhuthu can't be installed in {}:\n{e:#}\n\nChoose a folder you can write to, \
                  for example one inside your user folder. (Program Files needs \
                  administrator rights.)",
                 dir.display()
@@ -478,7 +525,7 @@ pub fn pick_folder(owner: HWND, start: &Path) -> Result<Option<PathBuf>> {
         dialog.SetOptions(
             dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST,
         )?;
-        dialog.SetTitle(w!("Choose where to install ezhuthu"))?;
+        dialog.SetTitle(w!("Choose where to install Ezhuthu"))?;
         dialog.SetOkButtonLabel(w!("Select folder"))?;
         if let Ok(item) =
             SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(start.as_os_str()), None)

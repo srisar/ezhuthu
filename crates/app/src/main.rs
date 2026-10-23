@@ -51,7 +51,7 @@ fn main() {
                 }
                 Err(_) => win::error_box(
                     None,
-                    "ezhuthu is already running. Look for its icon in the tray.",
+                    "Ezhuthu is already running. Look for its icon in the tray.",
                 ),
             }
             return;
@@ -81,18 +81,18 @@ fn uninstall() {
             .as_deref()
             .is_some_and(|i| ezhuthu_install::same_dir(d, i))
     }) else {
-        fail("This copy of ezhuthu isn't the installed one, so there is nothing to uninstall.");
+        fail("This copy of Ezhuthu isn't the installed one, so there is nothing to uninstall.");
         return;
     };
     if !silent
         && !win::ask(
-            "Remove ezhuthu from this computer?\n\nYour settings in %APPDATA%\\ezhuthu are kept.",
+            "Remove Ezhuthu from this computer?\n\nYour settings in %APPDATA%\\ezhuthu are kept.",
         )
     {
         return;
     }
     match ezhuthu_install::uninstall(&dir) {
-        Ok(()) if !silent => win::info_box("ezhuthu was removed."),
+        Ok(()) if !silent => win::info_box("Ezhuthu was removed."),
         Ok(()) => {}
         Err(e) => fail(&format!("Uninstall failed:\n\n{e:#}")),
     }

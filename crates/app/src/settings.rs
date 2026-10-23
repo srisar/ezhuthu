@@ -147,7 +147,7 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class,
-            w!("ezhuthu settings"),
+            w!("Ezhuthu settings"),
             style,
             work.left + (work.right - work.left - w) / 2,
             work.top + (work.bottom - work.top - h) / 2,
@@ -263,7 +263,7 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
         )?;
         child(
             w!("BUTTON"),
-            "Start ezhuthu when I sign in to Windows",
+            "Start Ezhuthu when I sign in to Windows",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_AUTOSTART,
@@ -338,7 +338,7 @@ fn warn(hwnd: HWND, text: &str) {
         MessageBoxW(
             Some(hwnd),
             &HSTRING::from(text),
-            w!("ezhuthu settings"),
+            w!("Ezhuthu settings"),
             MB_OK | MB_ICONWARNING,
         );
     }
