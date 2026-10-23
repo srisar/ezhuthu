@@ -97,6 +97,8 @@ struct App {
     status: Status,
     cache: HashMap<String, Vec<String>>,
     pending: HashSet<String>,
+    /// The word (cache key) whose candidates the popup shows; see `shown`.
+    shown_key: Option<String>,
     /// Tamil mode: the keyboard hook is installed.
     on: bool,
     kb_hook: Option<HHOOK>,
@@ -161,6 +163,7 @@ pub fn run() -> Result<()> {
         status: Status::Loading,
         cache: HashMap::new(),
         pending: HashSet::new(),
+        shown_key: None,
         on: false,
         kb_hook: None,
         fg_hook: None,
@@ -360,12 +363,50 @@ impl App {
     /// The popup's options once the word's Tamil candidates are known: those
     /// that fit, then the word as typed, for English without leaving Tamil mode.
     fn candidates(&self) -> Vec<String> {
-        let Some(tamil) = self.composer.key().and_then(|k| self.cache.get(&k)) else {
+        self.options(self.composer.key().as_deref())
+    }
+
+    /// What the popup shows: the current options, or until they arrive the
+    /// last ones shown for this word, so the rows don't blank out (flicker)
+    /// on every letter.
+    fn shown(&self) -> Vec<String> {
+        match self.candidates() {
+            list if list.is_empty() => self.options(self.shown_key.as_deref()),
+            list => list,
+        }
+    }
+
+    /// The Tamil candidates of `key` that fit, then the current word as typed.
+    fn options(&self, key: Option<&str>) -> Vec<String> {
+        let Some(tamil) = key.and_then(|k| self.cache.get(k)) else {
             return Vec::new();
         };
         let mut list: Vec<String> = tamil.iter().take(self.rows() - 1).cloned().collect();
         list.push(self.composer.core().to_string());
         list
+    }
+
+    /// Once the current word's candidates are known, they are the ones on show.
+    fn note_shown(&mut self) {
+        if let Some(key) = self.composer.key()
+            && self.cache.contains_key(&key)
+        {
+            self.shown_key = Some(key);
+        }
+    }
+
+    /// Fills in the current word's candidates now if the engine hasn't yet
+    /// (~40 ms), for a key that commits before it answers.
+    fn ensure_candidates(&mut self) {
+        if let (Some(key), Some(xlit)) = (self.composer.key(), &self.xlit)
+            && !self.cache.contains_key(&key)
+        {
+            let cands = xlit
+                .transliterate(&key)
+                .map(|c| c.into_iter().map(|c| c.text).collect())
+                .unwrap_or_default();
+            self.cache.insert(key, cands);
+        }
     }
 
     fn rows(&self) -> usize {
@@ -387,6 +428,7 @@ impl App {
             self.hide_popup();
         } else {
             self.request();
+            self.note_shown();
             self.invalidate();
         }
     }
@@ -397,7 +439,9 @@ impl App {
         let anchor = caret::find(unsafe { GetForegroundWindow() });
         self.composer.clear();
         self.composer.push(c);
+        self.shown_key = None;
         self.request();
+        self.note_shown();
         self.popup.set_dpi(caret::dpi_at(anchor));
         let (w, h) = self.popup.size();
         let (x, y) = caret::place(anchor, w, h, self.popup.gap());
@@ -434,6 +478,7 @@ impl App {
 
     fn discard(&mut self) {
         self.composer.clear();
+        self.shown_key = None;
         self.flash = None;
         self.hide_popup();
     }
@@ -443,22 +488,14 @@ impl App {
         if self.composer.is_empty() {
             return;
         }
-        // Space pressed before the engine answered: finish it here (~40 ms).
-        if let (Some(key), Some(xlit)) = (self.composer.key(), &self.xlit)
-            && !self.cache.contains_key(&key)
-        {
-            let cands = xlit
-                .transliterate(&key)
-                .map(|c| c.into_iter().map(|c| c.text).collect())
-                .unwrap_or_default();
-            self.cache.insert(key, cands);
-        }
+        self.ensure_candidates();
         let text = self.composer.render(Some(&self.candidates())) + suffix;
         self.discard();
         self.emit(Out::Text(text));
     }
 
     fn pick(&mut self, index: usize) -> bool {
+        self.ensure_candidates();
         if index >= self.candidates().len() {
             return false;
         }
@@ -578,7 +615,7 @@ impl App {
                 self.after_edit();
             }
             v if (v == VK_UP.0 || v == VK_DOWN.0) && composing => {
-                let n = self.candidates().len();
+                let n = self.shown().len();
                 self.composer
                     .move_selection(if v == VK_UP.0 { -1 } else { 1 }, n);
                 self.invalidate();
@@ -611,7 +648,7 @@ impl App {
     }
 
     fn view(&self) -> View {
-        let candidates = self.candidates();
+        let candidates = self.shown();
         let (hint, warn) = if let Some(f) = &self.flash {
             (f.clone(), true)
         } else {
@@ -718,6 +755,7 @@ fn on_engine_events() {
                 }
             }
         }
+        a.note_shown();
         a.invalidate();
         failed
     })
