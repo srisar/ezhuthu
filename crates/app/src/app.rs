@@ -69,6 +69,7 @@ const WM_APP_FOREGROUND: u32 = WM_APP + 5;
 pub const WM_APP_SETTINGS: u32 = WM_APP + 6;
 const NIN_SELECT: u32 = WM_USER;
 const HOTKEY_ID: i32 = 1;
+/// Tamil candidates shown at most (the popup adds a row for English).
 const MAX_ROWS: usize = 9;
 /// Words kept in the candidate cache before it is cleared.
 const MAX_CACHE: usize = 2000;
@@ -141,7 +142,7 @@ pub fn run() -> Result<()> {
     };
 
     let main = create_main_window()?;
-    let popup = Popup::create(Some(popup_proc), config.beam.min(MAX_ROWS))?;
+    let popup = Popup::create(Some(popup_proc), popup_rows(config.beam))?;
     let tray = Tray::add(main, WM_APP_TRAY, &tooltip(&config, false))?;
     // SAFETY: the string is a valid NUL-terminated literal.
     TASKBAR_CREATED.set(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) });
@@ -193,6 +194,11 @@ pub fn run() -> Result<()> {
     }
     APP.with(|cell| cell.borrow_mut().take());
     Ok(())
+}
+
+/// Popup rows for `beam` suggestions: the Tamil ones that fit, plus English.
+fn popup_rows(beam: usize) -> usize {
+    beam.min(MAX_ROWS) + 1
 }
 
 fn tooltip(config: &Config, on: bool) -> String {
@@ -348,14 +354,18 @@ impl App {
         self.status = Status::Loading;
         self.cache.clear();
         self.pending.clear();
-        self.popup.set_rows(beam.min(MAX_ROWS));
+        self.popup.set_rows(popup_rows(beam));
     }
 
-    fn candidates(&self) -> &[String] {
-        self.composer
-            .key()
-            .and_then(|k| self.cache.get(&k))
-            .map_or(&[], Vec::as_slice)
+    /// The popup's options once the word's Tamil candidates are known: those
+    /// that fit, then the word as typed, for English without leaving Tamil mode.
+    fn candidates(&self) -> Vec<String> {
+        let Some(tamil) = self.composer.key().and_then(|k| self.cache.get(&k)) else {
+            return Vec::new();
+        };
+        let mut list: Vec<String> = tamil.iter().take(self.rows() - 1).cloned().collect();
+        list.push(self.composer.core().to_string());
+        list
     }
 
     fn rows(&self) -> usize {
@@ -443,13 +453,13 @@ impl App {
                 .unwrap_or_default();
             self.cache.insert(key, cands);
         }
-        let text = self.composer.render(Some(self.candidates())) + suffix;
+        let text = self.composer.render(Some(&self.candidates())) + suffix;
         self.discard();
         self.emit(Out::Text(text));
     }
 
     fn pick(&mut self, index: usize) -> bool {
-        if index >= self.candidates().len().min(self.rows()) {
+        if index >= self.candidates().len() {
             return false;
         }
         self.composer.select(index);
@@ -568,7 +578,7 @@ impl App {
                 self.after_edit();
             }
             v if (v == VK_UP.0 || v == VK_DOWN.0) && composing => {
-                let n = self.candidates().len().min(self.rows());
+                let n = self.candidates().len();
                 self.composer
                     .move_selection(if v == VK_UP.0 { -1 } else { 1 }, n);
                 self.invalidate();
@@ -578,10 +588,10 @@ impl App {
                 let ch = key_char(ev.vk as u32, ev.scan).filter(|c| !c.is_control());
                 match (composing, ch) {
                     (true, Some(c)) => {
+                        // 1–9 pick rows 1–9, and 0 the tenth.
                         let picked = c
                             .to_digit(10)
-                            .filter(|&d| d >= 1)
-                            .is_some_and(|d| self.pick(d as usize - 1));
+                            .is_some_and(|d| self.pick((d as usize + 9) % 10));
                         if !picked {
                             self.composer.push(c);
                             self.after_edit();
@@ -601,24 +611,26 @@ impl App {
     }
 
     fn view(&self) -> View {
-        let candidates: Vec<String> = self
-            .candidates()
-            .iter()
-            .take(self.rows())
-            .cloned()
-            .collect();
+        let candidates = self.candidates();
         let (hint, warn) = if let Some(f) = &self.flash {
             (f.clone(), true)
         } else {
             match &self.status {
                 Status::Loading => ("Loading the model…".to_string(), false),
                 Status::Failed(e) => (format!("Model failed to load: {e}"), true),
-                Status::Ready => (HINT.replace("1–5", &format!("1–{}", self.rows())), false),
+                Status::Ready => {
+                    let keys = match self.rows() {
+                        n @ ..=9 => format!("1–{n}"),
+                        _ => "1–9, 0".to_string(),
+                    };
+                    (HINT.replace("1–5", &keys), false)
+                }
             }
         };
         View {
             input: self.composer.text().to_string(),
-            preview: self.composer.render(Some(self.candidates())),
+            preview: self.composer.render(Some(&candidates)),
+            english: candidates.len().checked_sub(1),
             candidates,
             selected: self.composer.selected(),
             hint,
