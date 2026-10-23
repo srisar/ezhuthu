@@ -35,14 +35,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, DLGC_WANTALLKEYS,
     DefWindowProcW, DestroyIcon, DestroyWindow, ES_READONLY, GetClientRect, GetDlgCtrlID,
-    GetDlgItem, HICON, HMENU, IDC_ARROW, IDCANCEL, IDOK, IMAGE_ICON, LR_DEFAULTCOLOR, LoadCursorW,
-    LoadIconW, LoadImageW, MB_ICONWARNING, MB_OK, MessageBoxW, NONCLIENTMETRICSW, PRF_CLIENT,
-    RegisterClassExW, SPI_GETNONCLIENTMETRICS, STM_SETICON, SW_HIDE, SW_SHOW, SW_SHOWNORMAL,
-    SendMessageW, SetForegroundWindow, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN,
-    WM_NOTIFY, WM_PRINTCLIENT, WM_SETFONT, WM_SYSCHAR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION,
-    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_GROUP, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    GetDlgItem, HICON, HMENU, IDC_ARROW, IDCANCEL, IDOK, IDYES, IMAGE_ICON, LR_DEFAULTCOLOR,
+    LoadCursorW, LoadIconW, LoadImageW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK,
+    MB_YESNO, MessageBoxW, NONCLIENTMETRICSW, PRF_CLIENT, RegisterClassExW,
+    SPI_GETNONCLIENTMETRICS, STM_SETICON, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SendMessageW,
+    SetForegroundWindow, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_GETDLGCODE, WM_KEYDOWN, WM_NOTIFY,
+    WM_PRINTCLIENT, WM_SETFONT, WM_SYSCHAR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION, WS_CHILD,
+    WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_GROUP, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
@@ -56,6 +57,8 @@ const ID_PASTE: i32 = 12;
 const ID_BEAM: i32 = 13;
 const ID_AUTOSTART: i32 = 14;
 const ID_TABS: i32 = 15;
+const ID_REMEMBER: i32 = 16;
+const ID_FORGET: i32 = 17;
 /// Radio buttons for the presets, then "Custom".
 const ID_PRESET: i32 = 20;
 const ID_CUSTOM: i32 = ID_PRESET + PRESETS.len() as i32;
@@ -81,11 +84,21 @@ pub struct Values {
     pub hotkey: String,
     pub insert_mode: InsertMode,
     pub beam: usize,
+    pub remember_picks: bool,
     pub autostart: bool,
 }
 
 /// Validates, applies and saves; Err(message) keeps the window open.
 pub type Apply = fn(&Values) -> Result<(), String>;
+
+/// What the window asks of the app.
+pub struct Actions {
+    pub apply: Apply,
+    /// Forgets the learned words now (the "Forget learned words…" button).
+    pub forget: fn() -> Result<(), String>,
+    /// Runs when the window closes, whether by OK or Cancel.
+    pub on_close: fn(),
+}
 
 struct Window {
     hwnd: HWND,
@@ -99,6 +112,7 @@ struct Window {
     /// Controls of each tab, shown or hidden as the tab changes.
     pages: [Vec<HWND>; 2],
     apply: Apply,
+    forget: fn() -> Result<(), String>,
     on_close: fn(),
 }
 
@@ -111,15 +125,15 @@ pub fn hwnd() -> Option<HWND> {
     WINDOW.with(|w| w.borrow().as_ref().map(|w| w.hwnd))
 }
 
-/// Opens the Settings window (or brings it to the front). `on_close` runs
-/// when it closes, whether by OK or Cancel.
-pub fn open(values: Values, apply: Apply, on_close: fn()) {
+/// Opens the Settings window (or brings it to the front).
+pub fn open(values: Values, actions: Actions) {
     if let Some(h) = hwnd() {
         // SAFETY: bringing our own window to the front.
         let _ = unsafe { SetForegroundWindow(h) };
         return;
     }
-    if let Err(e) = create(values, apply, on_close) {
+    let on_close = actions.on_close;
+    if let Err(e) = create(values, actions) {
         crate::win::error_box(None, &format!("Couldn't open Settings:\n\n{e:#}"));
         on_close();
     }
@@ -133,7 +147,7 @@ fn preset_index(hotkey: &str) -> Option<usize> {
         .position(|(p, _)| Hotkey::parse(p).ok() == Some(h))
 }
 
-fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result<()> {
+fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
     // SAFETY: standard window creation on the UI thread; all strings outlive
     // the calls that use them; fonts and the logo are freed in WM_DESTROY.
     unsafe {
@@ -176,13 +190,13 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
         title_lf.lfWeight = 700;
         let title_font = CreateFontIndirectW(&title_lf);
 
-        // Client area 500 x 476 (96-DPI units), centred on the primary monitor.
+        // Client area 500 x 508 (96-DPI units), centred on the primary monitor.
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut r = RECT {
             left: 0,
             top: 0,
             right: s(500),
-            bottom: s(476),
+            bottom: s(508),
         };
         let _ = AdjustWindowRectExForDpi(&mut r, style, false, WINDOW_EX_STYLE(0), dpi);
         let (w, h) = (r.right - r.left, r.bottom - r.top);
@@ -266,7 +280,7 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             tab | WS_CLIPSIBLINGS.0,
             none,
             ID_TABS,
-            (12, 10, 476, 414),
+            (12, 10, 476, 446),
         )?;
         for (i, name) in ["General", "About"].iter().enumerate() {
             let mut text: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -401,15 +415,31 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             )?);
             general.push(muted(note, (X + 200, y + 2, 240, 18))?);
         }
+        general.push(child(
+            w!("BUTTON"),
+            "Remember the suggestions I pick",
+            tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
+            none,
+            ID_REMEMBER,
+            (X, 364, 270, 22),
+        )?);
+        general.push(child(
+            w!("BUTTON"),
+            "Forget learned words…",
+            tab | BS_PUSHBUTTON as u32,
+            none,
+            ID_FORGET,
+            (RIGHT - 160, 362, 160, 26),
+        )?);
 
-        general.extend(section("Startup", 368)?);
+        general.extend(section("Startup", 400)?);
         general.push(child(
             w!("BUTTON"),
             "Start Ezhuthu when I sign in to Windows",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_AUTOSTART,
-            (X, 392, 420, 22),
+            (X, 424, 420, 22),
         )?);
 
         // ---------------------------------------------------------------- About
@@ -527,7 +557,7 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             tab | WS_GROUP.0 | BS_DEFPUSHBUTTON as u32,
             none,
             IDOK.0,
-            (320, 436, 80, 28),
+            (320, 468, 80, 28),
         )?;
         child(
             w!("BUTTON"),
@@ -535,7 +565,7 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             tab | BS_PUSHBUTTON as u32,
             none,
             IDCANCEL.0,
-            (408, 436, 80, 28),
+            (408, 468, 80, 28),
         )?;
 
         // Current values.
@@ -561,15 +591,9 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             .clamp(*BEAM_CHOICES.start(), *BEAM_CHOICES.end())
             - BEAM_CHOICES.start();
         SendMessageW(beam, CB_SETCURSEL, Some(WPARAM(beam_index)), None);
-        let _ = CheckDlgButton(
-            hwnd,
-            ID_AUTOSTART,
-            if values.autostart {
-                BST_CHECKED
-            } else {
-                BST_UNCHECKED
-            },
-        );
+        let check = |on: bool| if on { BST_CHECKED } else { BST_UNCHECKED };
+        let _ = CheckDlgButton(hwnd, ID_REMEMBER, check(values.remember_picks));
+        let _ = CheckDlgButton(hwnd, ID_AUTOSTART, check(values.autostart));
 
         WINDOW.with(|cell| {
             *cell.borrow_mut() = Some(Window {
@@ -580,8 +604,9 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
                 page_brush,
                 hotkey: custom_text,
                 pages: [general, about],
-                apply,
-                on_close,
+                apply: actions.apply,
+                forget: actions.forget,
+                on_close: actions.on_close,
             });
         });
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -599,6 +624,18 @@ fn warn(hwnd: HWND, text: &str) {
             &HSTRING::from(text),
             w!("Ezhuthu settings"),
             MB_OK | MB_ICONWARNING,
+        );
+    }
+}
+
+fn info(hwnd: HWND, text: &str) {
+    // SAFETY: both strings are valid for the duration of the call.
+    unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            &HSTRING::from(text),
+            w!("Ezhuthu settings"),
+            MB_OK | MB_ICONINFORMATION,
         );
     }
 }
@@ -634,8 +671,34 @@ fn read(hwnd: HWND, custom: String) -> Result<Values, String> {
         hotkey,
         insert_mode,
         beam,
+        remember_picks: checked(hwnd, ID_REMEMBER),
         autostart: checked(hwnd, ID_AUTOSTART),
     })
+}
+
+/// "Forget learned words…": asks, then clears them straight away.
+fn on_forget(hwnd: HWND) {
+    let Some(forget) = WINDOW.with(|w| w.borrow().as_ref().map(|w| w.forget)) else {
+        return;
+    };
+    // SAFETY: a message box owned by our window; both strings are valid.
+    let answer = unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            w!(
+                "Forget the suggestions Ezhuthu has learned from your picks?\n\n\
+                Every word goes back to the model's own order."
+            ),
+            w!("Ezhuthu settings"),
+            MB_YESNO | MB_ICONQUESTION,
+        )
+    };
+    if answer == IDYES {
+        match forget() {
+            Ok(()) => info(hwnd, "Learned words forgotten."),
+            Err(msg) => warn(hwnd, &msg),
+        }
+    }
 }
 
 fn on_ok(hwnd: HWND) {
@@ -746,6 +809,7 @@ unsafe extern "system" fn window_proc(
                     let _ = unsafe { DestroyWindow(hwnd) };
                 }
                 i if (ID_PRESET..=ID_CUSTOM).contains(&i) => on_shortcut_choice(hwnd, i),
+                ID_FORGET => on_forget(hwnd),
                 _ => {}
             }
             LRESULT(0)
@@ -904,9 +968,20 @@ mod tests {
             hotkey: "Ctrl+Alt+T".into(),
             insert_mode: InsertMode::Unicode,
             beam: 5,
+            remember_picks: true,
             autostart: true,
         };
-        open(values, apply, closed);
+        fn forget() -> Result<(), String> {
+            Ok(())
+        }
+        open(
+            values,
+            Actions {
+                apply,
+                forget,
+                on_close: closed,
+            },
+        );
         if std::env::var("EZHUTHU_PREVIEW_TAB").as_deref() == Ok("1") {
             show_page(1);
             // SAFETY: selecting the About tab on our own tab control.

@@ -55,6 +55,7 @@ use crate::engine::{Engine, Event};
 use crate::focus;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::insert::{self, Out};
+use crate::learned::Learned;
 use crate::popup::{Popup, View};
 use crate::settings;
 use crate::tray::{self, Tray};
@@ -67,6 +68,8 @@ const WM_APP_FLUSH: u32 = WM_APP + 4;
 const WM_APP_FOREGROUND: u32 = WM_APP + 5;
 /// Opens Settings; sent by a second launch of ezhuthu.exe (see main.rs).
 pub const WM_APP_SETTINGS: u32 = WM_APP + 6;
+/// Saves the learned words after a pick changed them.
+const WM_APP_SAVE_LEARNED: u32 = WM_APP + 7;
 const NIN_SELECT: u32 = WM_USER;
 const HOTKEY_ID: i32 = 1;
 /// Tamil candidates shown at most (the popup adds a row for English).
@@ -99,6 +102,10 @@ struct App {
     pending: HashSet<String>,
     /// The word (cache key) whose candidates the popup shows; see `shown`.
     shown_key: Option<String>,
+    /// Picks remembered across sessions, and their file (None: not saved).
+    learned: Learned,
+    learned_path: Option<PathBuf>,
+    learned_dirty: bool,
     /// Tamil mode: the keyboard hook is installed.
     on: bool,
     kb_hook: Option<HHOOK>,
@@ -149,6 +156,20 @@ pub fn run() -> Result<()> {
     // SAFETY: the string is a valid NUL-terminated literal.
     TASKBAR_CREATED.set(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) });
 
+    // An unreadable file is reported but not overwritten: picks are then
+    // only kept for this session.
+    let learned_path = Learned::path().ok();
+    let learned = match learned_path.as_deref().map(Learned::load) {
+        Some(Ok(l)) => Some(l),
+        Some(Err(e)) => {
+            eprintln!("learned words not loaded: {e:#}");
+            None
+        }
+        None => None,
+    };
+    let learned_path = learned_path.filter(|_| learned.is_some());
+    let learned = learned.unwrap_or_default();
+
     focus::start();
     let engine = Engine::start(config.assets_dir(), config.beam, main, WM_APP_ENGINE);
     let mut app = App {
@@ -164,6 +185,9 @@ pub fn run() -> Result<()> {
         cache: HashMap::new(),
         pending: HashSet::new(),
         shown_key: None,
+        learned,
+        learned_path,
+        learned_dirty: false,
         on: false,
         kb_hook: None,
         fg_hook: None,
@@ -378,12 +402,55 @@ impl App {
 
     /// The Tamil candidates of `key` that fit, then the current word as typed.
     fn options(&self, key: Option<&str>) -> Vec<String> {
-        let Some(tamil) = key.and_then(|k| self.cache.get(k)) else {
+        let (Some(key), Some(tamil)) = (key, key.and_then(|k| self.cache.get(k))) else {
             return Vec::new();
         };
-        let mut list: Vec<String> = tamil.iter().take(self.rows() - 1).cloned().collect();
+        let mut list = tamil.clone();
+        if self.config.remember_picks {
+            self.learned.apply(key, &mut list);
+        }
+        list.truncate(self.rows() - 1);
         list.push(self.composer.core().to_string());
         list
+    }
+
+    /// Remembers a Tamil pick for the current word (not the English row),
+    /// and saves soon after if that changed anything.
+    fn learn(&mut self, options: &[String]) {
+        let selected = self.composer.selected();
+        let chosen = if selected < options.len() {
+            selected
+        } else {
+            0
+        };
+        let Some(key) = self.composer.key() else {
+            return;
+        };
+        if !self.config.remember_picks || chosen + 1 >= options.len() {
+            return;
+        }
+        let model_top = self.cache.get(&key).and_then(|c| c.first());
+        if self
+            .learned
+            .record(&key, &options[chosen], model_top.map(String::as_str))
+            && !self.learned_dirty
+        {
+            self.learned_dirty = true;
+            post(self.main, WM_APP_SAVE_LEARNED);
+        }
+    }
+
+    /// Writes the learned words if they changed (posted, so the file write
+    /// never happens inside the keyboard hook).
+    fn save_learned(&mut self) {
+        if !std::mem::take(&mut self.learned_dirty) {
+            return;
+        }
+        if let Some(path) = &self.learned_path
+            && let Err(e) = self.learned.save(path)
+        {
+            eprintln!("learned words not saved: {e:#}");
+        }
     }
 
     /// Once the current word's candidates are known, they are the ones on show.
@@ -489,7 +556,9 @@ impl App {
             return;
         }
         self.ensure_candidates();
-        let text = self.composer.render(Some(&self.candidates())) + suffix;
+        let options = self.candidates();
+        self.learn(&options);
+        let text = self.composer.render(Some(&options)) + suffix;
         self.discard();
         self.emit(Out::Text(text));
     }
@@ -810,32 +879,47 @@ fn on_tray(event: u32) {
 /// unregistered (so pressing it records it in the hotkey box instead of
 /// toggling Tamil mode) and the keyboard hook ignores keys meant for it.
 fn open_settings() {
-    if settings::hwnd().is_some() {
-        settings::open(current_values(), apply_settings, settings_closed);
-        return;
+    if settings::hwnd().is_none() {
+        with_app(|a| {
+            // SAFETY: our registration; re-registered in `settings_closed`.
+            let _ = unsafe { UnregisterHotKey(Some(a.main), HOTKEY_ID) };
+            a.discard();
+        });
     }
-    with_app(|a| {
-        // SAFETY: our registration; re-registered in `settings_closed`.
-        let _ = unsafe { UnregisterHotKey(Some(a.main), HOTKEY_ID) };
-        a.discard();
-    });
-    settings::open(current_values(), apply_settings, settings_closed);
+    let actions = settings::Actions {
+        apply: apply_settings,
+        forget: forget_learned,
+        on_close: settings_closed,
+    };
+    settings::open(current_values(), actions);
 }
 
 fn current_values() -> settings::Values {
     let autostart = ezhuthu_install::autostart_enabled();
-    with_app(|a| settings::Values {
-        hotkey: a.config.hotkey.clone(),
-        insert_mode: a.config.insert_mode,
-        beam: a.config.beam,
+    let config = with_app(|a| a.config.clone()).unwrap_or_default();
+    settings::Values {
+        hotkey: config.hotkey,
+        insert_mode: config.insert_mode,
+        beam: config.beam,
+        remember_picks: config.remember_picks,
         autostart,
-    })
-    .unwrap_or(settings::Values {
-        hotkey: Config::default().hotkey,
-        insert_mode: InsertMode::Unicode,
-        beam: ezhuthu_xlit::DEFAULT_BEAM,
-        autostart,
-    })
+    }
+}
+
+/// Settings "Forget learned words…": clears them and deletes the file.
+fn forget_learned() -> Result<(), String> {
+    let result = with_app(|a| {
+        a.learned.clear();
+        a.learned_dirty = false;
+        match &a.learned_path {
+            Some(path) => a
+                .learned
+                .save(path)
+                .map_err(|e| format!("Couldn't delete the learned words: {e:#}")),
+            None => Ok(()),
+        }
+    });
+    result.unwrap_or_else(|| Err("Ezhuthu is busy; try again".into()))
 }
 
 fn settings_closed() {
@@ -868,6 +952,7 @@ fn apply_settings(v: &settings::Values) -> Result<(), String> {
         new.hotkey = v.hotkey.clone();
         new.insert_mode = v.insert_mode;
         new.beam = v.beam;
+        new.remember_picks = v.remember_picks;
         new.save(&a.config_path)
             .map_err(|e| format!("Couldn't save the settings: {e:#}"))?;
         if new.beam != a.config.beam {
@@ -884,6 +969,7 @@ fn apply_settings(v: &settings::Values) -> Result<(), String> {
 fn quit() {
     let main = with_app(|a| {
         a.set_mode(false);
+        a.save_learned();
         a.tray.remove();
         // SAFETY: our registration.
         let _ = unsafe { UnregisterHotKey(Some(a.main), HOTKEY_ID) };
@@ -912,6 +998,9 @@ unsafe extern "system" fn main_proc(
         // The installer asks a running copy to quit this way.
         WM_CLOSE => quit(),
         WM_APP_SETTINGS => open_settings(),
+        WM_APP_SAVE_LEARNED => {
+            with_app(|a| a.save_learned());
+        }
         WM_APP_FOREGROUND => {
             with_app(|a| a.discard());
         }
