@@ -80,8 +80,26 @@ impl Learned {
         true
     }
 
-    pub fn clear(&mut self) {
-        self.words.clear();
+    /// Every remembered word as (key, Tamil word), sorted by key.
+    pub fn entries(&self) -> Vec<(String, String)> {
+        let mut list: Vec<_> = self
+            .words
+            .iter()
+            .map(|(k, w)| (k.clone(), w.clone()))
+            .collect();
+        list.sort();
+        list
+    }
+
+    /// Replaces every remembered word (the Settings list); invalid entries
+    /// are dropped.
+    pub fn set(&mut self, entries: &[(String, String)]) {
+        self.words = entries
+            .iter()
+            .filter(|(key, word)| valid(key, word))
+            .take(MAX_WORDS)
+            .cloned()
+            .collect();
     }
 
     fn to_tsv(&self) -> String {
@@ -115,7 +133,7 @@ impl Learned {
 }
 
 /// A key is a lowercase romanized word; a word is Tamil text on one line.
-fn valid(key: &str, word: &str) -> bool {
+pub fn valid(key: &str, word: &str) -> bool {
     !key.is_empty()
         && key.bytes().all(|b| b.is_ascii_lowercase())
         && word.chars().any(|c| ('\u{0B80}'..='\u{0BFF}').contains(&c))
@@ -174,6 +192,20 @@ mod tests {
         );
         assert!(!l.record("Kadal", "கடல்", None), "keys are lowercase");
         assert!(!l.record("kadal", "கடல்\nx", None));
+        assert_eq!(l.len(), 0);
+    }
+
+    #[test]
+    fn settings_list_round_trips_and_drops_bad_entries() {
+        let mut l = Learned::default();
+        let pair = |k: &str, w: &str| (k.to_string(), w.to_string());
+        l.set(&[
+            pair("thamil", "தமில்"),
+            pair("Bad", "தமில்"),
+            pair("kadal", "கடல்"),
+        ]);
+        assert_eq!(l.entries(), [pair("kadal", "கடல்"), pair("thamil", "தமில்")]);
+        l.set(&[]);
         assert_eq!(l.len(), 0);
     }
 
