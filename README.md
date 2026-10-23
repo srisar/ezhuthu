@@ -12,7 +12,27 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 | 1: model export and parity (`tools/export/`) | done: ONNX matches PyTorch, which matches fairseq, on all test words |
 | 2: `xlit` crate and `xlit-cli` (`crates/xlit`) | done: tract, KV-cached decoder, exact top-5 parity with Python |
 | 3: tray app (`crates/app`) | done: tested in Notepad, Chrome, Word, VS Code; Windows search box not yet tried |
-| 4–5: refine, polish | not started |
+| 4: refine (Ctrl+R) | deferred |
+| 5: polish | per-user installer and Start with Windows done |
+
+## Install
+
+Run `ezhuthu-setup-<version>.exe`. It installs for the current user only, with no administrator rights. The setup window shows the install folder, by default `%LOCALAPPDATA%\Programs\ezhuthu`. Use **Browse…** to pick another location (an `ezhuthu` folder is created there) or type a path. Setup then:
+- restricts the install folder so only you, SYSTEM and Administrators can change it. A drive without permissions (FAT32/exFAT) is refused;
+- adds a Start Menu shortcut;
+- adds an entry in **Settings > Apps**, whose uninstall runs `ezhuthu.exe --uninstall`;
+- sets **Start with Windows** if its checkbox is ticked (you can change it later from the tray menu);
+- starts the app.
+
+Running a newer setup updates an existing install in place, and settings in `%APPDATA%\ezhuthu` are kept. Uninstall deletes only ezhuthu's own files (a fixed list built into the program, after checking for links), so anything else in the folder is left alone. Unattended install: `ezhuthu-setup.exe --silent [--dir <folder>] [--autostart] [--no-launch]`. The setup isn't code-signed yet, so Windows SmartScreen may warn the first time. Choose **More info > Run anyway**.
+
+To build the installer (after `tools/fetch-assets.sh`):
+
+```bash
+tools/build-installer.sh   # -> dist/ezhuthu-setup-<version>.exe
+```
+
+It is a single self-contained file: the release `ezhuthu.exe` plus the model assets.
 
 ## The app
 

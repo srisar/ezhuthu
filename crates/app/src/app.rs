@@ -43,8 +43,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MA_NOACTIVATE, MSG, PostMessageW,
     PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNORMAL,
     SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEACTIVATE, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_USER, WNDCLASSEXW,
 };
 use windows::core::{PCWSTR, w};
@@ -719,6 +719,8 @@ fn on_tray(event: u32) {
     const SETTINGS: usize = 2;
     const RELOAD: usize = 3;
     const QUIT: usize = 4;
+    const AUTOSTART: usize = 5;
+    let autostart = ezhuthu_install::autostart_enabled();
     let toggle_label = if on {
         "Turn Tamil mode off"
     } else {
@@ -730,16 +732,37 @@ fn on_tray(event: u32) {
         (TOGGLE, toggle_label),
         (SETTINGS, "Open settings file"),
         (RELOAD, "Reload settings"),
+        (AUTOSTART, "Start with Windows"),
         (0, "-"),
         (QUIT, "Quit"),
     ];
+    let checked: &[usize] = if autostart { &[AUTOSTART] } else { &[] };
     // Modal loop: the app state must not be borrowed meanwhile.
-    match tray::menu(main, &items) {
+    match tray::menu(main, &items, checked) {
         TOGGLE => toggle(),
         SETTINGS => open_in_notepad(&path),
         RELOAD => reload_settings(),
+        AUTOSTART => set_autostart(!autostart),
         QUIT => quit(),
         _ => {}
+    }
+}
+
+fn set_autostart(on: bool) {
+    let exe = std::env::current_exe();
+    let result = match (&exe, on) {
+        (Ok(exe), true) => ezhuthu_install::set_autostart(Some(exe)),
+        (_, false) => ezhuthu_install::set_autostart(None),
+        (Err(e), true) => Err(anyhow::anyhow!("can't find ezhuthu.exe: {e}")),
+    };
+    if let Err(e) = result {
+        with_app(|a| {
+            a.tray.notify(
+                "Couldn't change Start with Windows",
+                &format!("{e:#}"),
+                true,
+            )
+        });
     }
 }
 
@@ -810,6 +833,8 @@ unsafe extern "system" fn main_proc(
         WM_APP_FLUSH => flush(),
         WM_APP_TRAY => on_tray((lparam.0 & 0xFFFF) as u32),
         WM_APP_ENGINE => on_engine_events(),
+        // The installer asks a running copy to quit this way.
+        WM_CLOSE => quit(),
         WM_APP_FOREGROUND => {
             with_app(|a| a.discard());
         }

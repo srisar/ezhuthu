@@ -16,3 +16,6 @@ __pycache__/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Installer output (tools/build-installer.sh)
+/dist/
