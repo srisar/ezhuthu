@@ -20,6 +20,8 @@ Ezhuthu is a free, open-source Tamil phonetic keyboard for Windows. Press a shor
   <img src="docs/images/popup.png" width="720" alt="Typing natchathiram with Tamil mode on: the popup at the cursor shows நட்சத்திரம் and four other Tamil suggestions, then the word as typed, marked English">
 </p>
 
+https://github.com/user-attachments/assets/536c3641-c8ce-476e-b6c6-b47aebe3d056
+
 ## Features
 
 - **Works everywhere:** Notepad, Word, browsers, VS Code, chat apps and the Start menu search box.
