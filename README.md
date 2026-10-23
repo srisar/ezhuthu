@@ -34,7 +34,7 @@ tools/build-installer.sh   # -> dist/ezhuthu-setup-<version>.exe
 
 It is a single self-contained file: the release `ezhuthu.exe` plus the model assets.
 
-To publish a release, bump `version` in `Cargo.toml`, merge to main, then run `tools/release.sh` from an up-to-date main. It checks formatting, lints and tests, builds the installer, tags `v<version>` and creates the GitHub release with the installer and its SHA-256. Use `--dry-run` to build without publishing, or `--draft` to review the release on GitHub before publishing.
+To publish a release, bump `version` in `Cargo.toml`, merge to main, then run `tools/release.sh` from an up-to-date main. It tags `v<version>` and pushes the tag. GitHub Actions ([`release.yml`](.github/workflows/release.yml)) then checks formatting, lints and tests on Windows, builds the installer and creates the GitHub release with the installer and its SHA-256. `--dry-run` runs only the local checks. To rebuild an existing tag, use **Actions > Release > Run workflow**: it keeps the installer as a workflow artifact, or replaces the release files if **publish** is ticked.
 
 ## The app
 

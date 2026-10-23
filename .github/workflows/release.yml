@@ -1,0 +1,105 @@
+# Builds the installer on Windows and publishes it as a GitHub release.
+#
+# - Pushing a tag v<version> (tools/release.sh does it) builds that tag and
+#   creates its release, or replaces the files of an existing one.
+# - Run it by hand (Actions > Release > Run workflow) to rebuild any tag; it
+#   only uploads to the release when "publish" is ticked, otherwise the
+#   installer is kept as a workflow artifact.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v0.1.0"
+        required: true
+      publish:
+        description: "Upload to the tag's GitHub release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      CARGO_TERM_COLOR: always
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Check the tag matches the version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG doesn't match version $version in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Fetch the model assets
+        run: tools/fetch-assets.sh
+
+      - name: Format, lints and tests
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Build the installer
+        run: |
+          tools/build-installer.sh
+          cd dist
+          sha256sum "ezhuthu-setup-${TAG#v}.exe" > "ezhuthu-setup-${TAG#v}.exe.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ezhuthu-setup-${{ env.TAG }}
+          path: dist/
+
+      - name: Publish the release
+        if: github.event_name == 'push' || inputs.publish
+        run: |
+          setup="dist/ezhuthu-setup-${TAG#v}.exe"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$setup" "$setup.sha256" --clobber
+          else
+            notes="Download **ezhuthu-setup-${TAG#v}.exe** and run it. It installs for the current user, with no administrator rights. Running it over an older version updates it in place and keeps your settings.
+
+          The setup isn't code-signed yet, so Windows SmartScreen may warn the first time: choose **More info > Run anyway**. To check the download, compare its SHA-256 with the \`.sha256\` file."
+            gh release create "$TAG" "$setup" "$setup.sha256" \
+              --verify-tag \
+              --title "Ezhuthu ${TAG#v}" \
+              --notes "$notes" \
+              --generate-notes \
+              --latest
+          fi
