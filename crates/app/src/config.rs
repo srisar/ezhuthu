@@ -14,14 +14,47 @@ pub enum InsertMode {
     Clipboard,
 }
 
+/// The popup's colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Follow Windows' app mode (Settings > Personalisation > Colours).
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+
+    /// Whether to draw dark, reading Windows' setting for `System`.
+    pub fn is_dark(self) -> bool {
+        match self {
+            Theme::System => crate::win::apps_use_dark_theme(),
+            Theme::Light => false,
+            Theme::Dark => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub hotkey: String,
+    /// Converts the selected text to Tamil (see `convert`); empty: off.
+    pub convert_hotkey: String,
     pub insert_mode: InsertMode,
     pub beam: usize,
     /// Learn the suggestions the user picks (see `learned`).
     pub remember_picks: bool,
+    pub theme: Theme,
     pub assets_dir: Option<PathBuf>,
 }
 
@@ -29,9 +62,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "Ctrl+Alt+T".into(),
+            convert_hotkey: "Ctrl+Alt+Shift+T".into(),
             insert_mode: InsertMode::Unicode,
             beam: ezhuthu_xlit::DEFAULT_BEAM,
             remember_picks: true,
+            theme: Theme::System,
             assets_dir: None,
         }
     }
@@ -82,6 +117,10 @@ impl Config {
              # Turns Tamil mode on and off: Ctrl / Alt / Shift / Win + a key.\n\
              hotkey = {}\n\
              \n\
+             # Converts the selected text (English letters) to Tamil, in any app.\n\
+             # Empty (\"\") turns it off.\n\
+             convert_hotkey = {}\n\
+             \n\
              # How text reaches the app: \"unicode\" types the characters (default);\n\
              # \"clipboard\" pastes with Ctrl+V, for apps that garble typed Tamil.\n\
              insert_mode = {}\n\
@@ -93,12 +132,18 @@ impl Config {
              # (kept in learned.tsv next to this file).\n\
              remember_picks = {}\n\
              \n\
+             # Popup colours: \"system\" follows Windows' light/dark mode; or\n\
+             # \"light\" or \"dark\".\n\
+             theme = {}\n\
+             \n\
              # Folder with the model files. Default: \"assets\" next to ezhuthu.exe.\n\
              {assets}",
             quote(&self.hotkey),
+            quote(&self.convert_hotkey),
             quote(mode),
             self.beam,
             self.remember_picks,
+            quote(self.theme.as_str()),
         )
     }
 
@@ -163,9 +208,11 @@ mod tests {
     fn saved_settings_read_back_identically() {
         let c = Config {
             hotkey: "Ctrl+Shift+F5".into(),
+            convert_hotkey: String::new(),
             insert_mode: InsertMode::Clipboard,
             beam: 7,
             remember_picks: false,
+            theme: Theme::Dark,
             assets_dir: Some(PathBuf::from(r#"D:\it's "odd"\assets"#)),
         };
         assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);

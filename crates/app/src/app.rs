@@ -39,22 +39,25 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HHOOK,
-    HWND_TOPMOST, IsDialogMessageW, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MA_NOACTIVATE, MSG,
+    HWND_TOPMOST, IsDialogMessageW, KBDLLHOOKSTRUCT, KillTimer, LLKHF_EXTENDED, MA_NOACTIVATE, MSG,
     PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_USER, WNDCLASSEXW,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE,
+    WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WM_TIMER, WM_USER, WNDCLASSEXW,
 };
 use windows::core::w;
 
+use crate::badge::Badge;
 use crate::caret;
 use crate::compose::Composer;
 use crate::config::{Config, InsertMode};
+use crate::convert;
 use crate::engine::{Engine, Event};
 use crate::focus;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
-use crate::insert::{self, Out};
+use crate::insert::{self, Out, SavedClipboard};
 use crate::learned::Learned;
 use crate::popup::{Popup, View};
 use crate::settings;
@@ -70,6 +73,19 @@ const WM_APP_FOREGROUND: u32 = WM_APP + 5;
 pub const WM_APP_SETTINGS: u32 = WM_APP + 6;
 /// Saves the learned words after a pick changed them.
 const WM_APP_SAVE_LEARNED: u32 = WM_APP + 7;
+/// The convert-selection shortcut, caught by the hook in Tamil mode.
+const WM_APP_CONVERT: u32 = WM_APP + 8;
+const CONVERT_HOTKEY_ID: i32 = 2;
+/// Polls convert selection's waits (keys released, clipboard changed).
+const CONVERT_TIMER: usize = 1;
+const CONVERT_TICK_MS: u32 = 30;
+/// Animates convert selection's progress badge (about 60 frames a second).
+const BADGE_TIMER: usize = 2;
+const BADGE_TICK_MS: u32 = 16;
+/// Give up on convert selection if the shortcut's keys are still held, or
+/// nothing reaches the clipboard, after this long.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
+const COPY_TIMEOUT: Duration = Duration::from_millis(1500);
 const NIN_SELECT: u32 = WM_USER;
 const HOTKEY_ID: i32 = 1;
 /// Tamil candidates shown at most (the popup adds a row for English).
@@ -122,6 +138,30 @@ struct App {
     in_flight_since: Instant,
     /// One-off message shown in the hint line until the next key.
     flash: Option<String>,
+    convert_hotkey: Option<Hotkey>,
+    converting: Option<Converting>,
+    badge: Badge,
+}
+
+/// A convert selection in progress, in `target` (the window it started in;
+/// if another window comes to the front it is cancelled).
+struct Converting {
+    target: HWND,
+    stage: Stage,
+}
+
+enum Stage {
+    /// Waiting for the user to let go of the shortcut's keys, so our Ctrl+C
+    /// isn't read as Ctrl+Alt+C.
+    Release { since: Instant },
+    /// Ctrl+C sent; waiting for the selection to reach the clipboard.
+    Copy {
+        since: Instant,
+        sequence: u32,
+        saved: SavedClipboard,
+    },
+    /// Waiting for the engine to transliterate the words.
+    Words { text: String, keys: Vec<String> },
 }
 
 thread_local! {
@@ -152,6 +192,7 @@ pub fn run() -> Result<()> {
 
     let main = create_main_window()?;
     let popup = Popup::create(Some(popup_proc), popup_rows(config.beam))?;
+    let badge = Badge::create()?;
     let tray = Tray::add(main, WM_APP_TRAY, &tooltip(&config, false))?;
     // SAFETY: the string is a valid NUL-terminated literal.
     TASKBAR_CREATED.set(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) });
@@ -199,12 +240,15 @@ pub fn run() -> Result<()> {
         in_flight: 0,
         in_flight_since: Instant::now(),
         flash: None,
+        convert_hotkey: None,
+        converting: None,
+        badge,
     };
     if let Some(e) = config_error {
         app.tray
             .notify("Settings file has an error (using defaults)", &e, true);
     }
-    app.register_hotkey();
+    app.register_hotkeys();
     APP.with(|cell| *cell.borrow_mut() = Some(app));
 
     let mut msg = MSG::default();
@@ -280,6 +324,296 @@ struct KeyEvent {
 }
 
 impl App {
+    /// Registers both shortcuts: Tamil mode's and convert selection's.
+    fn register_hotkeys(&mut self) {
+        self.register_hotkey();
+        self.register_convert_hotkey();
+    }
+
+    fn register_convert_hotkey(&mut self) {
+        // SAFETY: unregistering an id that isn't registered is harmless.
+        let _ = unsafe { UnregisterHotKey(Some(self.main), CONVERT_HOTKEY_ID) };
+        self.convert_hotkey = None;
+        if self.config.convert_hotkey.is_empty() {
+            return;
+        }
+        let hotkey = match Hotkey::parse(&self.config.convert_hotkey) {
+            Ok(h) => h,
+            Err(e) => {
+                self.tray.notify(
+                    "Invalid convert shortcut in settings",
+                    &format!("{e:#}"),
+                    true,
+                );
+                return;
+            }
+        };
+        let mods = HOT_KEY_MODIFIERS(hotkey.modifiers) | MOD_NOREPEAT;
+        // SAFETY: plain registration for our window.
+        let registered =
+            unsafe { RegisterHotKey(Some(self.main), CONVERT_HOTKEY_ID, mods, hotkey.vk) };
+        if registered.is_err() {
+            self.tray.notify(
+                "Convert shortcut unavailable",
+                &format!(
+                    "{} is used by another app. Change it in Settings.",
+                    self.config.convert_hotkey
+                ),
+                true,
+            );
+        }
+        self.convert_hotkey = Some(hotkey);
+    }
+
+    // ------------------------------------------------------ convert selection
+
+    /// The convert shortcut was pressed: start copying the selection once
+    /// its keys are released.
+    fn start_convert(&mut self) {
+        if self.converting.is_some() {
+            return;
+        }
+        match &self.status {
+            Status::Ready => {}
+            Status::Loading => {
+                self.tray.notify(
+                    "Ezhuthu",
+                    "The model is still loading; try again in a moment.",
+                    false,
+                );
+                return;
+            }
+            Status::Failed(e) => {
+                let e = e.clone();
+                self.tray.notify("The model isn't loaded", &e, true);
+                return;
+            }
+        }
+        // SAFETY: plain query.
+        let target = unsafe { GetForegroundWindow() };
+        if target.0.is_null() || settings::hwnd() == Some(target) || focus::in_password_field() {
+            return;
+        }
+        if insert::blocked_by_uipi(target) {
+            self.tray.notify(
+                "This window runs as administrator",
+                "Windows blocks Ezhuthu from changing its text; other windows work.",
+                true,
+            );
+            return;
+        }
+        self.discard();
+        self.converting = Some(Converting {
+            target,
+            stage: Stage::Release {
+                since: Instant::now(),
+            },
+        });
+        self.badge.start(target);
+        // SAFETY: timers on our own window; the convert timer is killed in
+        // `end_convert_wait`, the badge timer once the badge has faded out.
+        unsafe {
+            SetTimer(Some(self.main), CONVERT_TIMER, CONVERT_TICK_MS, None);
+            SetTimer(Some(self.main), BADGE_TIMER, BADGE_TICK_MS, None);
+        }
+    }
+
+    fn end_convert_wait(&self) {
+        // SAFETY: killing our own timer (harmless if it isn't running).
+        let _ = unsafe { KillTimer(Some(self.main), CONVERT_TIMER) };
+    }
+
+    /// Stops convert selection, telling the user why (if `why` is given).
+    fn cancel_convert(&mut self, why: Option<&str>) {
+        self.end_convert_wait();
+        if let Some(Converting {
+            stage: Stage::Copy { saved, .. },
+            ..
+        }) = self.converting.take()
+        {
+            let _ = insert::restore_clipboard(&saved);
+        }
+        if let Some(why) = why {
+            self.tray.notify("Convert selection", why, false);
+        }
+    }
+
+    /// Timer tick: advances the waits of convert selection.
+    fn convert_tick(&mut self) {
+        let Some(job) = self.converting.take() else {
+            self.end_convert_wait();
+            return;
+        };
+        // SAFETY: plain query.
+        if unsafe { GetForegroundWindow() } != job.target {
+            self.converting = Some(job);
+            self.cancel_convert(Some("Cancelled: another window came to the front."));
+            return;
+        }
+        let target = job.target;
+        match job.stage {
+            Stage::Release { since } => {
+                let held = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
+                    .iter()
+                    .any(|k| down(k.0));
+                if held {
+                    if since.elapsed() < RELEASE_TIMEOUT {
+                        self.converting = Some(Converting {
+                            target,
+                            stage: Stage::Release { since },
+                        });
+                    } else {
+                        self.end_convert_wait();
+                    }
+                    return;
+                }
+                let saved = match insert::save_clipboard() {
+                    Ok(saved) => saved,
+                    Err(e) => {
+                        self.end_convert_wait();
+                        self.tray
+                            .notify("Convert selection", &format!("{e:#}"), true);
+                        return;
+                    }
+                };
+                let sequence = insert::clipboard_sequence();
+                self.emit(Out::Copy);
+                self.converting = Some(Converting {
+                    target,
+                    stage: Stage::Copy {
+                        since: Instant::now(),
+                        sequence,
+                        saved,
+                    },
+                });
+            }
+            Stage::Copy {
+                since,
+                sequence,
+                saved,
+            } => {
+                // Some apps empty the clipboard before writing to it, so wait
+                // for text, not just for a change.
+                let text = if insert::clipboard_sequence() != sequence {
+                    insert::clipboard_text().ok().flatten()
+                } else {
+                    None
+                };
+                let Some(text) = text else {
+                    self.converting = Some(Converting {
+                        target,
+                        stage: Stage::Copy {
+                            since,
+                            sequence,
+                            saved,
+                        },
+                    });
+                    if since.elapsed() > COPY_TIMEOUT {
+                        self.cancel_convert(Some(
+                            "Nothing was copied. Select some text first, then press the shortcut.",
+                        ));
+                    }
+                    return;
+                };
+                self.end_convert_wait();
+                if let Err(e) = insert::restore_clipboard(&saved) {
+                    eprintln!("clipboard not restored: {e:#}");
+                }
+                self.convert_text(target, text);
+            }
+            // Driven by engine events, not the timer.
+            stage @ Stage::Words { .. } => {
+                self.end_convert_wait();
+                self.converting = Some(Converting { target, stage });
+            }
+        }
+    }
+
+    /// The selection was copied: get its words transliterated.
+    fn convert_text(&mut self, target: HWND, text: String) {
+        let keys = convert::keys(&text);
+        let why = if keys.is_empty() {
+            Some("The selection has no English letters to convert.".to_string())
+        } else if text.chars().count() > convert::MAX_CHARS {
+            Some(format!(
+                "Select less text: up to {} characters at a time.",
+                convert::MAX_CHARS
+            ))
+        } else if keys.len() > convert::MAX_WORDS {
+            Some(format!(
+                "Select less text: up to {} different words at a time.",
+                convert::MAX_WORDS
+            ))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            self.tray.notify("Convert selection", &why, false);
+            return;
+        }
+        let missing = keys.iter().filter(|k| !self.cache.contains_key(*k)).count();
+        if missing > 30 {
+            self.tray.notify(
+                "Convert selection",
+                &format!("Converting {missing} words…"),
+                false,
+            );
+        }
+        self.converting = Some(Converting {
+            target,
+            stage: Stage::Words { text, keys },
+        });
+        self.convert_ready();
+    }
+
+    /// Pastes the converted text once every word is transliterated
+    /// (re-requesting any the cache lost meanwhile).
+    fn convert_ready(&mut self) {
+        let Some(Converting {
+            stage: Stage::Words { keys, .. },
+            ..
+        }) = &self.converting
+        else {
+            return;
+        };
+        let missing: Vec<String> = keys
+            .iter()
+            .filter(|k| !self.cache.contains_key(*k))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            for key in missing {
+                self.request_key(key);
+            }
+            return;
+        }
+        let Some(Converting {
+            target,
+            stage: Stage::Words { text, .. },
+        }) = self.converting.take()
+        else {
+            return;
+        };
+        // SAFETY: plain query.
+        if unsafe { GetForegroundWindow() } != target {
+            self.tray.notify(
+                "Convert selection",
+                "Cancelled: another window came to the front.",
+                false,
+            );
+            return;
+        }
+        let tamil = convert::convert(&text, |key| {
+            let mut list = self.cache.get(key)?.clone();
+            if self.config.remember_picks {
+                self.learned.apply(key, &mut list);
+            }
+            list.into_iter().next()
+        });
+        self.emit(Out::Paste(tamil));
+        self.badge.done();
+    }
+
     fn register_hotkey(&mut self) {
         // SAFETY: unregistering an id that isn't registered is harmless.
         let _ = unsafe { UnregisterHotKey(Some(self.main), HOTKEY_ID) };
@@ -382,6 +716,7 @@ impl App {
         self.cache.clear();
         self.pending.clear();
         self.popup.set_rows(popup_rows(beam));
+        self.cancel_convert(None);
     }
 
     /// The popup's options once the word's Tamil candidates are known: those
@@ -482,10 +817,13 @@ impl App {
 
     /// Requests the current word from the engine unless cached or pending.
     fn request(&mut self) {
-        if let Some(key) = self.composer.key()
-            && !self.cache.contains_key(&key)
-            && self.pending.insert(key.clone())
-        {
+        if let Some(key) = self.composer.key() {
+            self.request_key(key);
+        }
+    }
+
+    fn request_key(&mut self, key: String) {
+        if !self.cache.contains_key(&key) && self.pending.insert(key.clone()) {
             self.engine.request(key);
         }
     }
@@ -509,6 +847,8 @@ impl App {
         self.shown_key = None;
         self.request();
         self.note_shown();
+        // Read each time, so a change to Windows' light/dark mode shows at once.
+        self.popup.set_dark(self.config.theme.is_dark());
         self.popup.set_dpi(caret::dpi_at(anchor));
         let (w, h) = self.popup.size();
         let (x, y) = caret::place(anchor, w, h, self.popup.gap());
@@ -644,6 +984,13 @@ impl App {
                 post(self.main, WM_APP_TOGGLE);
                 return true;
             }
+            if let Some(c) = self.convert_hotkey
+                && ev.vk as u32 == c.vk
+                && mods == c.modifiers
+            {
+                post(self.main, WM_APP_CONVERT);
+                return true;
+            }
         }
         if focus::in_password_field() {
             // Password field: never compose, show or cache; keys type as-is.
@@ -764,8 +1111,13 @@ fn flush() {
         let items = std::mem::take(&mut a.outbox);
         let mode = a.config.insert_mode;
         // SendInput runs our hook re-entrantly, before it returns, so the
-        // events must be counted as in flight before they are sent.
-        let expected = insert::event_count(&items, mode);
+        // events must be counted as in flight before they are sent. Without
+        // the hook (Tamil mode off, e.g. convert selection) none come back.
+        let expected = if a.kb_hook.is_some() {
+            insert::event_count(&items, mode)
+        } else {
+            0
+        };
         a.in_flight += expected;
         a.in_flight_since = Instant::now();
         Some((items, mode, expected))
@@ -812,6 +1164,7 @@ fn on_engine_events() {
                 Event::Failed(e) => {
                     eprintln!("model failed to load: {e}");
                     a.status = Status::Failed(e.clone());
+                    a.cancel_convert(None);
                     failed = Some(e);
                 }
                 Event::Done { key, candidates } => {
@@ -826,6 +1179,7 @@ fn on_engine_events() {
         }
         a.note_shown();
         a.invalidate();
+        a.convert_ready();
         failed
     })
     .flatten();
@@ -881,9 +1235,13 @@ fn on_tray(event: u32) {
 fn open_settings() {
     if settings::hwnd().is_none() {
         with_app(|a| {
-            // SAFETY: our registration; re-registered in `settings_closed`.
-            let _ = unsafe { UnregisterHotKey(Some(a.main), HOTKEY_ID) };
+            // SAFETY: our registrations; re-registered in `settings_closed`.
+            unsafe {
+                let _ = UnregisterHotKey(Some(a.main), HOTKEY_ID);
+                let _ = UnregisterHotKey(Some(a.main), CONVERT_HOTKEY_ID);
+            }
             a.discard();
+            a.cancel_convert(None);
         });
     }
     let actions = settings::Actions {
@@ -899,9 +1257,11 @@ fn current_values() -> settings::Values {
     let config = with_app(|a| a.config.clone()).unwrap_or_default();
     settings::Values {
         hotkey: config.hotkey,
+        convert_hotkey: config.convert_hotkey,
         insert_mode: config.insert_mode,
         beam: config.beam,
         remember_picks: config.remember_picks,
+        theme: config.theme,
         autostart,
     }
 }
@@ -923,26 +1283,39 @@ fn forget_learned() -> Result<(), String> {
 }
 
 fn settings_closed() {
-    with_app(|a| a.register_hotkey());
+    with_app(|a| a.register_hotkeys());
 }
 
 /// Settings window OK: validate, apply live and save.
 fn apply_settings(v: &settings::Values) -> Result<(), String> {
     let hotkey = Hotkey::parse(&v.hotkey).map_err(|e| format!("{e:#}"))?;
+    let convert = match v.convert_hotkey.as_str() {
+        "" => None,
+        keys => Some(Hotkey::parse(keys).map_err(|e| format!("{e:#}"))?),
+    };
+    if convert == Some(hotkey) {
+        return Err("Tamil mode and convert selection need different shortcuts.".into());
+    }
     let result = with_app(|a| {
-        if v.hotkey != a.config.hotkey {
-            // The current hotkey is unregistered while Settings is open, so a
-            // trial registration tells whether another app holds the new one.
-            let mods = HOT_KEY_MODIFIERS(hotkey.modifiers) | MOD_NOREPEAT;
+        // Both shortcuts are unregistered while Settings is open, so a trial
+        // registration tells whether another app holds a new one.
+        let taken = |keys: &str, h: Hotkey| {
+            let mods = HOT_KEY_MODIFIERS(h.modifiers) | MOD_NOREPEAT;
             // SAFETY: a trial registration, removed straight away.
-            let free = unsafe { RegisterHotKey(Some(a.main), HOTKEY_ID, mods, hotkey.vk) }.is_ok();
+            let free = unsafe { RegisterHotKey(Some(a.main), HOTKEY_ID, mods, h.vk) }.is_ok();
             let _ = unsafe { UnregisterHotKey(Some(a.main), HOTKEY_ID) };
-            if !free {
-                return Err(format!(
-                    "{} is already used by another app. Choose another.",
-                    v.hotkey
-                ));
-            }
+            (!free).then(|| format!("{keys} is already used by another app. Choose another."))
+        };
+        if v.hotkey != a.config.hotkey
+            && let Some(e) = taken(&v.hotkey, hotkey)
+        {
+            return Err(e);
+        }
+        if let Some(c) = convert
+            && v.convert_hotkey != a.config.convert_hotkey
+            && let Some(e) = taken(&v.convert_hotkey, c)
+        {
+            return Err(e);
         }
         let exe = std::env::current_exe().map_err(|e| format!("can't find ezhuthu.exe: {e}"))?;
         ezhuthu_install::set_autostart(v.autostart.then_some(exe.as_path()))
@@ -950,9 +1323,11 @@ fn apply_settings(v: &settings::Values) -> Result<(), String> {
 
         let mut new = a.config.clone();
         new.hotkey = v.hotkey.clone();
+        new.convert_hotkey = v.convert_hotkey.clone();
         new.insert_mode = v.insert_mode;
         new.beam = v.beam;
         new.remember_picks = v.remember_picks;
+        new.theme = v.theme;
         new.save(&a.config_path)
             .map_err(|e| format!("Couldn't save the settings: {e:#}"))?;
         if new.beam != a.config.beam {
@@ -970,9 +1345,13 @@ fn quit() {
     let main = with_app(|a| {
         a.set_mode(false);
         a.save_learned();
+        a.cancel_convert(None);
         a.tray.remove();
-        // SAFETY: our registration.
-        let _ = unsafe { UnregisterHotKey(Some(a.main), HOTKEY_ID) };
+        // SAFETY: our registrations.
+        unsafe {
+            let _ = UnregisterHotKey(Some(a.main), HOTKEY_ID);
+            let _ = UnregisterHotKey(Some(a.main), CONVERT_HOTKEY_ID);
+        }
         a.main
     });
     if let Some(main) = main {
@@ -992,6 +1371,23 @@ unsafe extern "system" fn main_proc(
     match msg {
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_ID => toggle(),
         WM_APP_TOGGLE => toggle(),
+        WM_HOTKEY if wparam.0 as i32 == CONVERT_HOTKEY_ID => {
+            with_app(|a| a.start_convert());
+        }
+        WM_APP_CONVERT => {
+            with_app(|a| a.start_convert());
+        }
+        WM_TIMER if wparam.0 == CONVERT_TIMER => {
+            with_app(|a| a.convert_tick());
+        }
+        WM_TIMER if wparam.0 == BADGE_TIMER => {
+            with_app(|a| {
+                if !a.badge.tick(a.converting.is_some()) {
+                    // SAFETY: killing our own timer.
+                    let _ = unsafe { KillTimer(Some(a.main), BADGE_TIMER) };
+                }
+            });
+        }
         WM_APP_FLUSH => flush(),
         WM_APP_TRAY => on_tray((lparam.0 & 0xFFFF) as u32),
         WM_APP_ENGINE => on_engine_events(),

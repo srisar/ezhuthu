@@ -2,11 +2,12 @@
 
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::WindowsAndMessaging::{
     IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MESSAGEBOX_RESULT,
     MESSAGEBOX_STYLE, MessageBoxW,
 };
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, w};
 
 /// NUL-terminated UTF-16 for Win32 string parameters.
 pub fn wide(s: &str) -> Vec<u16> {
@@ -34,6 +35,27 @@ pub fn instance() -> HINSTANCE {
 /// Scales a 96-DPI length to `dpi`.
 pub fn scale(v: i32, dpi: u32) -> i32 {
     (v as i64 * dpi as i64 / 96) as i32
+}
+
+/// Windows' app mode (Settings > Personalisation > Colours): true for dark.
+/// Light when the setting can't be read (older Windows).
+pub fn apps_use_dark_theme() -> bool {
+    let mut value = 1u32;
+    let mut size = size_of::<u32>() as u32;
+    // SAFETY: `value` is a u32 and `size` its size; RegGetValueW writes at
+    // most that many bytes for a REG_DWORD.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut value as *mut u32 as *mut _),
+            Some(&mut size),
+        )
+    };
+    result.is_ok() && value == 0
 }
 
 pub fn error_box(owner: Option<HWND>, text: &str) {

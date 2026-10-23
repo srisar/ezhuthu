@@ -26,8 +26,10 @@ Ezhuthu is a free, open-source Tamil phonetic keyboard for Windows. Press a shor
 - **Suggestions at the cursor:** up to 9 Tamil candidates per word, ranked by how common each word is. Pick one with a number or the arrow keys.
 - **English when you need it:** the last suggestion is always the word exactly as you typed it, so a few English words don't need a mode switch.
 - **Learns your words:** pick a different suggestion once and it comes first next time.
+- **Convert selected text:** select romanized text you've already typed, press Ctrl+Alt+Shift+T, and it becomes Tamil.
 - **One shortcut:** Ctrl+Alt+T by default. Choose a preset or any combination in Settings.
 - **Private and offline:** no internet, no account. Password fields are never touched.
+- **Light and dark:** the popup follows Windows' light or dark mode, or pick one in Settings.
 - **Lightweight:** installs per user with no administrator rights, and starts with Windows if you like.
 
 ## Install
@@ -69,16 +71,23 @@ Ezhuthu remembers your choices. When you insert a suggestion other than the firs
 
 When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start menu search box.
 
+### Convert selection
+
+Already typed something in English letters, or pasted it from elsewhere? Select it in any app and press **Ctrl+Alt+Shift+T**. This works whether Tamil mode is on or off. A small badge by the cursor shows a spinner while it converts, then a check mark. Every word becomes its top Tamil suggestion, using the words Ezhuthu has learned from you. Spaces, line breaks, numbers, punctuation and text already in Tamil stay as they are. Ezhuthu copies the selection, pastes the Tamil over it, and puts your clipboard back the way it was. If another window comes to the front before it finishes, it cancels. It converts up to 300 different words at a time.
+
 ### Settings
 
 Right-click the tray icon and choose **Settings...** (launching Ezhuthu again while it's running also opens it).
 
 - **General** sets:
-  - the Tamil mode shortcut (one of four presets, or any custom combination);
   - suggestions per word;
   - how text is inserted (typing, or pasting for apps that garble typed Tamil);
   - remembering the suggestions you pick, and forgetting them;
+  - the popup theme: match Windows (default), light or dark;
   - Start with Windows.
+- **Shortcuts** sets:
+  - the Tamil mode shortcut (one of four presets, or any custom combination);
+  - the convert selection shortcut (or turns it off).
 - **About** shows the version, the source code link and the credits.
 
 Settings are saved in `%APPDATA%\ezhuthu\config.toml`.

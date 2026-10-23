@@ -7,9 +7,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod badge;
 mod caret;
 mod compose;
 mod config;
+mod convert;
 mod engine;
 mod focus;
 mod hotkey;

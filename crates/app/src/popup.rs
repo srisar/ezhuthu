@@ -7,17 +7,16 @@
 use anyhow::Result;
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_3DLIGHT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
-    COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateCompatibleBitmap,
-    CreateCompatibleDC, CreateFontW, DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_LEFT,
-    DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, FW_NORMAL,
-    FillRect, GetDC, GetSysColor, GetSysColorBrush, GetTextMetricsW, HDC, HFONT, HGDIOBJ,
+    BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_HIGHLIGHT, CreateCompatibleBitmap,
+    CreateCompatibleDC, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DRAW_TEXT_FORMAT,
+    DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
+    DrawTextW, FW_NORMAL, FillRect, GetDC, GetSysColor, GetTextMetricsW, HDC, HFONT, HGDIOBJ,
     OUT_DEFAULT_PRECIS, ReleaseDC, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TEXTMETRICW,
     TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CreateWindowExW, IDC_ARROW, LoadCursorW, RegisterClassExW, WNDCLASSEXW, WNDPROC,
-    WS_BORDER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -126,6 +125,7 @@ pub struct Popup {
     dpi: u32,
     rows: usize,
     fonts: Fonts,
+    palette: Palette,
 }
 
 impl Popup {
@@ -148,7 +148,7 @@ impl Popup {
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 class,
                 w!("ezhuthu"),
-                WS_POPUP | WS_BORDER,
+                WS_POPUP,
                 0,
                 0,
                 0,
@@ -164,6 +164,7 @@ impl Popup {
             dpi: 96,
             rows,
             fonts: Fonts::new(96),
+            palette: Palette::LIGHT,
         })
     }
 
@@ -172,6 +173,11 @@ impl Popup {
             self.dpi = dpi;
             self.fonts = Fonts::new(dpi);
         }
+    }
+
+    /// Light or dark colours (takes effect at the next paint).
+    pub fn set_dark(&mut self, dark: bool) {
+        self.palette = if dark { Palette::DARK } else { Palette::LIGHT };
     }
 
     pub fn set_rows(&mut self, rows: usize) {
@@ -219,7 +225,7 @@ impl Popup {
             })
             .collect();
         let hint = inner(top + s(4), f.small_h + s(4));
-        // +2 for WS_BORDER, which is outside the client area.
+        // +2 for the 1 px border drawn around the edge.
         Layout {
             w: w + 2,
             h: hint.bottom + pad + 2,
@@ -242,6 +248,9 @@ impl Popup {
     pub fn paint(&self, hdc: HDC, view: &View) {
         let l = self.layout();
         let f = &self.fonts;
+        let p = &self.palette;
+        // SAFETY: plain query.
+        let highlight = COLORREF(unsafe { GetSysColor(COLOR_HIGHLIGHT) });
         // SAFETY: the memory DC and bitmap are created, used and deleted here;
         // every selected object is restored before deletion.
         unsafe {
@@ -256,13 +265,20 @@ impl Popup {
                 right: l.w,
                 bottom: l.h,
             };
-            FillRect(mem, &full, GetSysColorBrush(COLOR_WINDOW));
+            fill(mem, &full, p.border);
+            let inside = RECT {
+                left: 1,
+                top: 1,
+                right: l.w - 1,
+                bottom: l.h - 1,
+            };
+            fill(mem, &inside, p.background);
 
             if view.input.is_empty() {
                 text(
                     mem,
                     f.input,
-                    COLOR_GRAYTEXT,
+                    p.muted,
                     l.input,
                     "type Tamil in English letters…",
                     DT_LEFT,
@@ -270,20 +286,20 @@ impl Popup {
             } else {
                 let mut shown = view.input.clone();
                 shown.push('▏'); // caret
-                text_tail(mem, f.input, COLOR_WINDOWTEXT, l.input, &shown);
+                text_tail(mem, f.input, p.text, l.input, &shown);
             }
-            text_tail(mem, f.tamil, COLOR_WINDOWTEXT, l.preview, &view.preview);
-            FillRect(mem, &l.sep, GetSysColorBrush(COLOR_3DLIGHT));
+            text_tail(mem, f.tamil, p.text, l.preview, &view.preview);
+            fill(mem, &l.sep, p.separator);
 
             for (i, (row, cand)) in l.rows.iter().zip(&view.candidates).enumerate() {
                 let selected = i == view.selected;
                 if selected {
-                    FillRect(mem, row, GetSysColorBrush(COLOR_HIGHLIGHT));
+                    fill(mem, row, highlight);
                 }
-                let fg = if selected {
-                    COLOR_HIGHLIGHTTEXT
+                let (fg, num_color) = if selected {
+                    (p.selected_text, p.selected_text)
                 } else {
-                    COLOR_WINDOWTEXT
+                    (p.text, p.muted)
                 };
                 let num_w = scale(26, self.dpi);
                 let num = RECT {
@@ -294,11 +310,6 @@ impl Popup {
                 let body = RECT {
                     left: row.left + num_w,
                     ..*row
-                };
-                let num_color = if selected {
-                    COLOR_HIGHLIGHTTEXT
-                } else {
-                    COLOR_GRAYTEXT
                 };
                 // The tenth row is picked with 0.
                 let key = ((i + 1) % 10).to_string();
@@ -313,22 +324,8 @@ impl Popup {
                 }
             }
 
-            let hint_color = if view.warn {
-                None
-            } else {
-                Some(COLOR_GRAYTEXT)
-            };
-            match hint_color {
-                Some(c) => text(mem, f.small, c, l.hint, &view.hint, DT_LEFT),
-                None => text_rgb(
-                    mem,
-                    f.small,
-                    COLORREF(0x0000_20C0),
-                    l.hint,
-                    &view.hint,
-                    DT_LEFT,
-                ),
-            }
+            let hint_color = if view.warn { p.warning } else { p.muted };
+            text(mem, f.small, hint_color, l.hint, &view.hint, DT_LEFT);
 
             let _ = BitBlt(hdc, 0, 0, l.w, l.h, Some(mem), 0, 0, SRCCOPY);
             SelectObject(mem, old_font);
@@ -339,15 +336,56 @@ impl Popup {
     }
 }
 
-type SysColor = windows::Win32::Graphics::Gdi::SYS_COLOR_INDEX;
-
-fn text(dc: HDC, font: HFONT, color: SysColor, r: RECT, s: &str, align: DRAW_TEXT_FORMAT) {
-    // SAFETY: plain query.
-    let rgb = COLORREF(unsafe { GetSysColor(color) });
-    text_rgb(dc, font, rgb, r, s, align);
+/// The popup's colours, light or dark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Palette {
+    background: COLORREF,
+    border: COLORREF,
+    separator: COLORREF,
+    text: COLORREF,
+    muted: COLORREF,
+    /// Text on the selected row (its background is the system highlight).
+    selected_text: COLORREF,
+    warning: COLORREF,
 }
 
-fn text_rgb(dc: HDC, font: HFONT, color: COLORREF, mut r: RECT, s: &str, align: DRAW_TEXT_FORMAT) {
+impl Palette {
+    const LIGHT: Self = Self {
+        background: rgb(0xFF, 0xFF, 0xFF),
+        border: rgb(0xC8, 0xC8, 0xC8),
+        separator: rgb(0xE6, 0xE6, 0xE6),
+        text: rgb(0x1B, 0x1B, 0x1B),
+        muted: rgb(0x6E, 0x6E, 0x6E),
+        selected_text: rgb(0xFF, 0xFF, 0xFF),
+        warning: rgb(0xC0, 0x20, 0x00),
+    };
+    /// Close to Windows 11's dark menus and flyouts.
+    const DARK: Self = Self {
+        background: rgb(0x2B, 0x2B, 0x2B),
+        border: rgb(0x48, 0x48, 0x48),
+        separator: rgb(0x3D, 0x3D, 0x3D),
+        text: rgb(0xF2, 0xF2, 0xF2),
+        muted: rgb(0xA3, 0xA3, 0xA3),
+        selected_text: rgb(0xFF, 0xFF, 0xFF),
+        warning: rgb(0xFF, 0x7B, 0x6B),
+    };
+}
+
+/// A COLORREF (which is 0x00BBGGRR) from red, green and blue.
+const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
+    COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
+}
+
+fn fill(dc: HDC, r: &RECT, color: COLORREF) {
+    // SAFETY: the brush is created, used and deleted here.
+    unsafe {
+        let brush = CreateSolidBrush(color);
+        FillRect(dc, r, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+    }
+}
+
+fn text(dc: HDC, font: HFONT, color: COLORREF, mut r: RECT, s: &str, align: DRAW_TEXT_FORMAT) {
     // An empty slice has a dangling pointer, and DrawTextW reads it even
     // with a length of 0 (it crashed user32), so never pass one.
     if s.is_empty() {
@@ -369,9 +407,9 @@ fn text_rgb(dc: HDC, font: HFONT, color: COLORREF, mut r: RECT, s: &str, align: 
 
 /// Left-aligned text, but right-aligned when too long, so the end
 /// (where the user is typing) stays visible.
-fn text_tail(dc: HDC, font: HFONT, color: SysColor, r: RECT, s: &str) {
+fn text_tail(dc: HDC, font: HFONT, color: COLORREF, r: RECT, s: &str) {
     if s.is_empty() {
-        return; // see text_rgb
+        return; // see text
     }
     let mut buf: Vec<u16> = s.encode_utf16().collect();
     let mut calc = r;
@@ -413,6 +451,86 @@ mod tests {
             selected: 0,
             hint: String::new(),
             warn: false,
+        }
+    }
+
+    /// Paints a sample popup in both themes to `popup-light.bmp` and
+    /// `popup-dark.bmp` under target/ (for screenshots). Run with:
+    /// cargo test -p ezhuthu popup_preview -- --ignored
+    #[test]
+    #[ignore]
+    fn popup_preview() {
+        use windows::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDIBits, SelectObject,
+        };
+        let mut popup = Popup::create(Some(proc), 6).unwrap();
+        popup.set_dpi(144);
+        let mut v = view(
+            "natchathiram",
+            "நட்சத்திரம்",
+            &[
+                "நட்சத்திரம்",
+                "நட்சதிரம்",
+                "நட்சாத்திரம்",
+                "நட்சாதிரம்",
+                "நாட்சத்திரம்",
+                "natchathiram",
+            ],
+        );
+        v.hint = "↑↓ or 1–6 choose · Space / Enter insert · Esc discard".into();
+        let (w, h) = popup.size();
+        for (dark, name) in [(false, "light"), (true, "dark")] {
+            popup.set_dark(dark);
+            // SAFETY: a screen-compatible bitmap painted, read back within its
+            // size and deleted, with every selection restored.
+            unsafe {
+                let screen = GetDC(None);
+                let dc = CreateCompatibleDC(Some(screen));
+                let bmp = CreateCompatibleBitmap(screen, w, h);
+                let old = SelectObject(dc, HGDIOBJ(bmp.0));
+                popup.paint(dc, &v);
+                SelectObject(dc, old);
+                let mut info = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w,
+                        biHeight: h,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let mut px = vec![0u8; (w * h * 4) as usize];
+                GetDIBits(
+                    dc,
+                    bmp,
+                    0,
+                    h as u32,
+                    Some(px.as_mut_ptr() as *mut _),
+                    &mut info,
+                    DIB_RGB_COLORS,
+                );
+                let _ = DeleteObject(HGDIOBJ(bmp.0));
+                let _ = DeleteDC(dc);
+                ReleaseDC(None, screen);
+                let mut file = Vec::new();
+                file.extend(b"BM");
+                file.extend((54 + px.len() as u32).to_le_bytes());
+                file.extend([0u8; 4]);
+                file.extend(54u32.to_le_bytes());
+                file.extend(40u32.to_le_bytes());
+                file.extend(w.to_le_bytes());
+                file.extend(h.to_le_bytes());
+                file.extend(1u16.to_le_bytes());
+                file.extend(32u16.to_le_bytes());
+                file.extend([0u8; 24]);
+                file.extend(&px);
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("../../target/popup-{name}.bmp"));
+                std::fs::write(path, file).unwrap();
+            }
         }
     }
 
