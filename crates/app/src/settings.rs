@@ -444,7 +444,7 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
         );
         about.push(title);
         about.push(muted(
-            &format!("Version {VERSION} · Free and open source"),
+            &format!("Version {VERSION} · Free and open source (MIT license)"),
             (X + 62, 82, 360, 20),
         )?);
         let built = "Built by Gravitide from Sri Lanka with Love";

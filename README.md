@@ -146,3 +146,7 @@ The letter's outline comes from Anek Tamil ExtraBold (SIL Open Font License 1.1)
 
 - Model: [AI4Bharat IndicXlit](https://github.com/AI4Bharat/IndicXlit), checkpoint `indicxlit-en-indic-v1.0`. Madhani et al., *Aksharantar: Open Indic-language Transliteration datasets and models for the Next Billion Users* (2022).
 - License: **MIT**, covering both code and models ("The IndicXlit code (and models) are released under the MIT License"; LICENSE: Copyright (c) 2022 AI4Bhārat).
+
+## License
+
+Ezhuthu is free and open source under the [MIT License](LICENSE). The model, word data, tract and Anek Tamil keep their own licenses (listed above and in Settings > About).
