@@ -29,6 +29,7 @@ Ezhuthu is a free, open-source Tamil phonetic keyboard for Windows. Press a shor
 - **Convert selected text:** select romanized text you've already typed, press Ctrl+Alt+Shift+T, and it becomes Tamil.
 - **One shortcut:** Ctrl+Alt+T by default. Choose a preset or any combination in Settings.
 - **Private and offline:** no internet, no account. Password fields are never touched.
+- **Light and dark:** the popup follows Windows' light or dark mode, or pick one in Settings.
 - **Lightweight:** installs per user with no administrator rights, and starts with Windows if you like.
 
 ## Install
@@ -82,6 +83,7 @@ Right-click the tray icon and choose **Settings...** (launching Ezhuthu again wh
   - suggestions per word;
   - how text is inserted (typing, or pasting for apps that garble typed Tamil);
   - remembering the suggestions you pick, and forgetting them;
+  - the popup theme: match Windows (default), light or dark;
   - Start with Windows.
 - **Shortcuts** sets:
   - the Tamil mode shortcut (one of four presets, or any custom combination);
