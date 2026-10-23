@@ -50,7 +50,7 @@ pub fn ask(text: &str) -> bool {
 }
 
 fn message(owner: Option<HWND>, text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
-    let (text, title) = (wide(text), wide("ezhuthu"));
+    let (text, title) = (wide(text), wide("Ezhuthu"));
     // SAFETY: both strings are NUL-terminated and outlive the call.
     unsafe { MessageBoxW(owner, PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), style) }
 }

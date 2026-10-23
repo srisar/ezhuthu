@@ -36,6 +36,8 @@ use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOS
 use windows::core::{BOOL, HSTRING, Interface, PCWSTR, PWSTR, w};
 
 pub const APP_NAME: &str = "ezhuthu";
+/// The name people see (Start Menu, Settings > Apps, windows).
+pub const DISPLAY_NAME: &str = "Ezhuthu";
 pub const EXE_NAME: &str = "ezhuthu.exe";
 /// Window class of the running app's hidden main window.
 pub const MAIN_WINDOW_CLASS: &str = "ezhuthu.main";
@@ -77,12 +79,13 @@ pub fn same_dir(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
-/// `%APPDATA%\Microsoft\Windows\Start Menu\Programs\ezhuthu.lnk`.
+/// `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Ezhuthu.lnk` (the file
+/// name is what the Start Menu shows).
 pub fn start_menu_shortcut() -> Result<PathBuf> {
     let roaming = std::env::var_os("APPDATA").context("APPDATA is not set")?;
     Ok(PathBuf::from(roaming)
         .join(r"Microsoft\Windows\Start Menu\Programs")
-        .join(format!("{APP_NAME}.lnk")))
+        .join(format!("{DISPLAY_NAME}.lnk")))
 }
 
 // ---------------------------------------------------------------- registry
@@ -223,9 +226,9 @@ pub fn set_autostart(exe: Option<&Path>) -> Result<()> {
 pub fn register_uninstall(dir: &Path, version: &str, size_kb: u32) -> Result<()> {
     let exe = dir.join(EXE_NAME);
     let key = Key::create(UNINSTALL_KEY)?;
-    key.set_str("DisplayName", "ezhuthu (Tamil phonetic input)")?;
+    key.set_str("DisplayName", "Ezhuthu (Tamil phonetic input)")?;
     key.set_str("DisplayVersion", version)?;
-    key.set_str("Publisher", "ezhuthu")?;
+    key.set_str("Publisher", "Ezhuthu")?;
     key.set_str("InstallLocation", &dir.display().to_string())?;
     key.set_str("DisplayIcon", &exe.display().to_string())?;
     key.set_str(
@@ -255,6 +258,9 @@ pub fn create_shortcut(target: &Path, lnk: &Path, description: &str) -> Result<(
     if let Some(dir) = lnk.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
+    // Overwriting keeps an existing file's letter case (e.g. an older
+    // "ezhuthu.lnk"), so remove it first to get the new name.
+    let _ = std::fs::remove_file(lnk);
     // SAFETY: COM is initialised for this thread (repeat calls are harmless);
     // the shell link object is released when the interfaces drop.
     unsafe {
@@ -531,7 +537,7 @@ pub fn installable_files() -> Vec<String> {
 /// settings in %APPDATA% are kept.
 pub fn uninstall(dir: &Path) -> Result<()> {
     if !close_running_app(Duration::from_secs(5)) {
-        bail!("ezhuthu is still running; quit it from the tray and try again");
+        bail!("Ezhuthu is still running; quit it from the tray and try again");
     }
     set_autostart(None)?;
     unregister_uninstall()?;

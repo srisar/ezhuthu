@@ -201,7 +201,7 @@ fn tooltip(config: &Config, on: bool) -> String {
     } else {
         "Tamil mode off"
     };
-    format!("ezhuthu: {state} ({} to toggle)", config.hotkey)
+    format!("Ezhuthu: {state} ({} to toggle)", config.hotkey)
 }
 
 fn create_main_window() -> Result<HWND> {
@@ -828,7 +828,7 @@ fn apply_settings(v: &settings::Values) -> Result<(), String> {
         a.tray.set_state(a.on, &tip);
         Ok(())
     });
-    result.unwrap_or_else(|| Err("ezhuthu is busy; try again".into()))
+    result.unwrap_or_else(|| Err("Ezhuthu is busy; try again".into()))
 }
 
 fn quit() {
@@ -999,5 +999,5 @@ unsafe extern "system" fn foreground_changed(
 
 /// Shows a fatal startup error (no console in release builds).
 pub fn report_fatal(e: &anyhow::Error) {
-    error_box(None, &format!("ezhuthu could not start:\n\n{e:#}"));
+    error_box(None, &format!("Ezhuthu could not start:\n\n{e:#}"));
 }

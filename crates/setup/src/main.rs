@@ -32,7 +32,7 @@ mod payload {
     include!(concat!(env!("OUT_DIR"), "/payload.rs"));
 }
 
-const TITLE: &str = "ezhuthu setup";
+const TITLE: &str = "Ezhuthu setup";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct Options {
@@ -115,7 +115,7 @@ fn run(opts: &Options) -> Result<()> {
     let exe = dir.join(install::EXE_NAME);
 
     if !install::close_running_app(Duration::from_secs(5)) {
-        bail!("ezhuthu is running and didn't close; quit it from the tray and run setup again");
+        bail!("Ezhuthu is running and didn't close; quit it from the tray and run setup again");
     }
     install::check_install_dir(&dir)?;
     ensure_writable(&dir)?;
@@ -127,7 +127,7 @@ fn run(opts: &Options) -> Result<()> {
     install::create_shortcut(
         &exe,
         &install::start_menu_shortcut()?,
-        "ezhuthu: Tamil phonetic input",
+        "Ezhuthu: Tamil phonetic input",
     )?;
     install::register_uninstall(&dir, VERSION, (bytes / 1024) as u32)?;
     install::set_autostart(autostart.then_some(exe.as_path()))?;
@@ -141,7 +141,7 @@ fn run(opts: &Options) -> Result<()> {
     if !opts.silent {
         message(
             &format!(
-                "ezhuthu is installed in {} and running in the tray (the எ icon).\n\n\
+                "Ezhuthu is installed in {} and running in the tray (the எ icon).\n\n\
                  Press Ctrl+Alt+T in any app to switch Tamil typing on or off.\n\
                  To remove it, use Settings > Apps > ezhuthu.",
                 dir.display()
@@ -156,7 +156,7 @@ fn run(opts: &Options) -> Result<()> {
 fn silent_dir(opts: &Options, existing: Option<&Path>) -> Result<PathBuf> {
     match (existing, &opts.dir) {
         (Some(e), Some(d)) if !install::same_dir(d, e) => bail!(
-            "ezhuthu is already installed in {}; uninstall it first to install elsewhere",
+            "Ezhuthu is already installed in {}; uninstall it first to install elsewhere",
             e.display()
         ),
         (Some(e), _) => Ok(e.to_path_buf()),
