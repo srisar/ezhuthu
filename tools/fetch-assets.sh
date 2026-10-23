@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Download the model assets from the GitHub Release into assets/ and verify
-# them against tools/assets.sha256. Needs the GitHub CLI (`gh auth login`)
-# because the repository is private.
+# them against tools/assets.sha256. Needs the GitHub CLI.
 #
 # Usage: tools/fetch-assets.sh [release-tag]   (default: the tag below)
 set -euo pipefail

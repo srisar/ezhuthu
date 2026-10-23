@@ -74,6 +74,7 @@ const PRESETS: &[(&str, &str)] = &[
     ("Alt+Shift+T", ""),
 ];
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const REPO_URL: &str = "https://github.com/srisar/ezhuthu";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Values {
@@ -464,8 +465,19 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             ID_HEART,
             (X + text_width(built) + 1, 122, 20, 20),
         )?);
+        about.push(child(
+            WC_LINK,
+            &format!(
+                "Source code: <a href=\"{REPO_URL}\">{}</a>",
+                REPO_URL.trim_start_matches("https://")
+            ),
+            tab,
+            none,
+            -1,
+            (X, 146, 440, 20),
+        )?);
 
-        about.extend(section("Credits", 160)?);
+        about.extend(section("Credits", 184)?);
         let credits: [(&str, &str, &str); 4] = [
             (
                 "Transliteration model: IndicXlit by AI4Bharat",
@@ -489,7 +501,7 @@ fn create(values: Values, apply: Apply, on_close: fn()) -> windows::core::Result
             ),
         ];
         for (i, (what, url, license)) in credits.iter().enumerate() {
-            let y = 186 + 50 * i as i32;
+            let y = 210 + 50 * i as i32;
             about.push(child(w!("STATIC"), what, 0, none, -1, (X, y, 440, 20))?);
             if url.is_empty() {
                 about.push(muted(license, (X, y + 20, 440, 20))?);
