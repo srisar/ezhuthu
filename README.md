@@ -20,7 +20,22 @@ Ezhuthu is a free, open-source Tamil phonetic keyboard for Windows. Press a shor
   <img src="docs/images/popup.png" width="720" alt="Typing natchathiram with Tamil mode on: the popup at the cursor shows நட்சத்திரம் and four other Tamil suggestions, then the word as typed, marked English">
 </p>
 
-https://github.com/user-attachments/assets/536c3641-c8ce-476e-b6c6-b47aebe3d056
+## See it in action
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/tour-1-type.gif" alt="Typing vanakkam in English letters turns into வணக்கம்"></td>
+    <td width="50%"><img src="docs/images/tour-2-shortcut.gif" alt="Pressing the shortcut turns Tamil mode on, and the tray icon switches to the Ezhuthu logo"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/tour-3-suggestions.gif" alt="Typing natchathiram shows Tamil suggestions; Space inserts நட்சத்திரம்"></td>
+    <td width="50%"><img src="docs/images/tour-4-english.gif" alt="Typing hello and picking the last row inserts the English word"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/tour-5-learns.gif" alt="Picking the second suggestion for thamil makes it come first next time"></td>
+    <td width="50%"><img src="docs/images/tour-6-convert.gif" alt="Selected romanized text becomes Tamil after pressing Ctrl+Alt+Shift+T, with a progress badge"></td>
+  </tr>
+</table>
 
 ## Features
 
@@ -234,5 +249,9 @@ uv run --with resvg-py make_logo.py ../../crates/app/logo/gravitide-logo-full.sv
 ## License
 
 Ezhuthu is free and open source under the [MIT License](LICENSE). The model, word data, tract and Anek Tamil keep their own licenses, listed above. The Gravitide name and logo belong to Gravitide and are not covered by the MIT License.
+
+<p align="center">
+  <a href="https://gravitide.dev"><img src="docs/images/tour-7-gravitide.gif" width="420" alt="Made by Gravitide: the Gravitide logo and a link to gravitide.dev"></a>
+</p>
 
 <p align="center">Built by <a href="https://gravitide.dev">Gravitide</a> from Sri Lanka with Love ❤️</p>
