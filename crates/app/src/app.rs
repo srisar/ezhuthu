@@ -49,6 +49,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::w;
 
+use crate::badge::Badge;
 use crate::caret;
 use crate::compose::Composer;
 use crate::config::{Config, InsertMode};
@@ -78,6 +79,9 @@ const CONVERT_HOTKEY_ID: i32 = 2;
 /// Polls convert selection's waits (keys released, clipboard changed).
 const CONVERT_TIMER: usize = 1;
 const CONVERT_TICK_MS: u32 = 30;
+/// Animates convert selection's progress badge (about 60 frames a second).
+const BADGE_TIMER: usize = 2;
+const BADGE_TICK_MS: u32 = 16;
 /// Give up on convert selection if the shortcut's keys are still held, or
 /// nothing reaches the clipboard, after this long.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -136,6 +140,7 @@ struct App {
     flash: Option<String>,
     convert_hotkey: Option<Hotkey>,
     converting: Option<Converting>,
+    badge: Badge,
 }
 
 /// A convert selection in progress, in `target` (the window it started in;
@@ -187,6 +192,7 @@ pub fn run() -> Result<()> {
 
     let main = create_main_window()?;
     let popup = Popup::create(Some(popup_proc), popup_rows(config.beam))?;
+    let badge = Badge::create()?;
     let tray = Tray::add(main, WM_APP_TRAY, &tooltip(&config, false))?;
     // SAFETY: the string is a valid NUL-terminated literal.
     TASKBAR_CREATED.set(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) });
@@ -236,6 +242,7 @@ pub fn run() -> Result<()> {
         flash: None,
         convert_hotkey: None,
         converting: None,
+        badge,
     };
     if let Some(e) = config_error {
         app.tray
@@ -402,8 +409,13 @@ impl App {
                 since: Instant::now(),
             },
         });
-        // SAFETY: a timer on our own window; killed in `end_convert_wait`.
-        unsafe { SetTimer(Some(self.main), CONVERT_TIMER, CONVERT_TICK_MS, None) };
+        self.badge.start(target);
+        // SAFETY: timers on our own window; the convert timer is killed in
+        // `end_convert_wait`, the badge timer once the badge has faded out.
+        unsafe {
+            SetTimer(Some(self.main), CONVERT_TIMER, CONVERT_TICK_MS, None);
+            SetTimer(Some(self.main), BADGE_TIMER, BADGE_TICK_MS, None);
+        }
     }
 
     fn end_convert_wait(&self) {
@@ -599,6 +611,7 @@ impl App {
             list.into_iter().next()
         });
         self.emit(Out::Paste(tamil));
+        self.badge.done();
     }
 
     fn register_hotkey(&mut self) {
@@ -1362,6 +1375,14 @@ unsafe extern "system" fn main_proc(
         }
         WM_TIMER if wparam.0 == CONVERT_TIMER => {
             with_app(|a| a.convert_tick());
+        }
+        WM_TIMER if wparam.0 == BADGE_TIMER => {
+            with_app(|a| {
+                if !a.badge.tick(a.converting.is_some()) {
+                    // SAFETY: killing our own timer.
+                    let _ = unsafe { KillTimer(Some(a.main), BADGE_TIMER) };
+                }
+            });
         }
         WM_APP_FLUSH => flush(),
         WM_APP_TRAY => on_tray((lparam.0 & 0xFFFF) as u32),

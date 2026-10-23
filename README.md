@@ -72,7 +72,7 @@ When no word is in progress, digits, punctuation, Enter, arrows and shortcuts ty
 
 ### Convert selection
 
-Already typed something in English letters, or pasted it from elsewhere? Select it in any app and press **Ctrl+Alt+Shift+T**. This works whether Tamil mode is on or off. Every word becomes its top Tamil suggestion, using the words Ezhuthu has learned from you. Spaces, line breaks, numbers, punctuation and text already in Tamil stay as they are. Ezhuthu copies the selection, pastes the Tamil over it, and puts your clipboard back the way it was. If another window comes to the front before it finishes, it cancels. It converts up to 300 different words at a time.
+Already typed something in English letters, or pasted it from elsewhere? Select it in any app and press **Ctrl+Alt+Shift+T**. This works whether Tamil mode is on or off. A small badge by the cursor shows a spinner while it converts, then a check mark. Every word becomes its top Tamil suggestion, using the words Ezhuthu has learned from you. Spaces, line breaks, numbers, punctuation and text already in Tamil stay as they are. Ezhuthu copies the selection, pastes the Tamil over it, and puts your clipboard back the way it was. If another window comes to the front before it finishes, it cancels. It converts up to 300 different words at a time.
 
 ### Settings
 
