@@ -10,7 +10,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use windows::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, LPARAM, WIN32_ERROR, WPARAM,
+    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE, HLOCAL, LPARAM, LocalFree,
+    WIN32_ERROR, WPARAM,
+};
+use windows::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    SE_FILE_OBJECT, SetNamedSecurityInfoW,
+};
+use windows::Win32::Security::{
+    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile,
@@ -20,9 +29,10 @@ use windows::Win32::System::Registry::{
     RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegGetValueW,
     RegSetValueExW,
 };
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOSE};
-use windows::core::{HSTRING, Interface, PCWSTR, w};
+use windows::core::{BOOL, HSTRING, Interface, PCWSTR, PWSTR, w};
 
 pub const APP_NAME: &str = "ezhuthu";
 pub const EXE_NAME: &str = "ezhuthu.exe";
@@ -32,9 +42,6 @@ pub const MAIN_WINDOW_CLASS: &str = "ezhuthu.main";
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const UNINSTALL_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ezhuthu");
 const VALUE_NAME: PCWSTR = w!("ezhuthu");
-
-/// Lists the files setup installed, for uninstall (see [`record_files`]).
-pub const FILE_LIST: &str = "install-files.txt";
 
 /// `%LOCALAPPDATA%\Programs`, the usual per-user program location and the
 /// folder picker's starting point.
@@ -297,22 +304,110 @@ pub fn close_running_app(timeout: Duration) -> bool {
     false
 }
 
+// ---------------------------------------------------------------- install folder security
+
+/// Restricts `dir` to the current user, SYSTEM and Administrators (a
+/// protected DACL, inherited by everything inside). Otherwise a folder that
+/// other users can write to would let them replace ezhuthu.exe, which runs
+/// as this user at every sign-in. Fails on drives without permissions
+/// (FAT32/exFAT), which can't be protected at all.
+pub fn secure_dir(dir: &Path) -> Result<()> {
+    let sid = current_user_sid()?;
+    let sddl = format!("D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+    // SAFETY: the security descriptor allocated by the conversion is freed
+    // with LocalFree; the DACL pointer points into it and is only used before.
+    unsafe {
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            &HSTRING::from(sddl),
+            SDDL_REVISION_1,
+            &mut sd,
+            None,
+        )
+        .context("building the folder permissions")?;
+        let (mut present, mut defaulted) = (BOOL(0), BOOL(0));
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let got = GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted);
+        let err = got.map(|()| {
+            SetNamedSecurityInfoW(
+                &HSTRING::from(dir.as_os_str()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(dacl),
+                None,
+            )
+        });
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        let err = err.context("reading the folder permissions")?;
+        if err != ERROR_SUCCESS {
+            bail!(
+                "couldn't restrict who can change {} (error {}); the drive may not \
+                 support permissions (FAT32/exFAT), so choose a folder on an NTFS drive",
+                dir.display(),
+                err.0
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The current user's SID as a string ("S-1-5-21-...").
+fn current_user_sid() -> Result<String> {
+    // SAFETY: the token handle is closed below; the TOKEN_USER buffer is sized
+    // by the first call; the SID string is freed with LocalFree.
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
+        let mut len = 0;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        let mut buf = vec![0u8; len as usize];
+        let got = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        );
+        let _ = CloseHandle(token);
+        got.context("reading the current user")?;
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let mut s = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut s)?;
+        let sid = s.to_string();
+        let _ = LocalFree(Some(HLOCAL(s.0.cast())));
+        Ok(sid?)
+    }
+}
+
 // ---------------------------------------------------------------- uninstall
 
-/// Records which files setup put in `dir` (paths relative to it, `/`-separated),
-/// so uninstall deletes exactly those and never anything else in a folder
-/// the user chose.
-pub fn record_files(dir: &Path, files: &[&str]) -> Result<()> {
-    let path = dir.join(FILE_LIST);
-    std::fs::write(&path, files.join("\n") + "\n")
-        .with_context(|| format!("writing {}", path.display()))
+/// Every asset setup may install (under `assets\`). Uninstall deletes only
+/// these names plus ezhuthu.exe, so nothing else in a folder the user chose
+/// is ever touched. Setup refuses to install anything not listed here.
+pub const ASSET_FILES: &[&str] = &[
+    "vocab_src.json",
+    "vocab_tgt.json",
+    "xlit_encoder.onnx",
+    "xlit_decoder.onnx",
+    "ta_word_freq.bin",
+];
+/// Left by earlier setup builds; removed if present.
+const LEGACY_FILES: &[&str] = &["install-files.txt"];
+
+/// Paths (relative, `/`-separated) of everything setup installs.
+pub fn installable_files() -> Vec<String> {
+    std::iter::once(EXE_NAME.to_string())
+        .chain(ASSET_FILES.iter().map(|f| format!("assets/{f}")))
+        .collect()
 }
 
 /// Removes ezhuthu for this user: stops it, deletes the Run value, uninstall
-/// entry and shortcut, then deletes the installed files once this process has
-/// exited (it may be running from `dir`). User settings in %APPDATA% are kept.
+/// entry, shortcut and the installed files. The running uninstaller
+/// (ezhuthu.exe itself) is deleted once this process has exited. User
+/// settings in %APPDATA% are kept.
 pub fn uninstall(dir: &Path) -> Result<()> {
-    let files = installed_files(dir)?;
     if !close_running_app(Duration::from_secs(5)) {
         bail!("ezhuthu is still running; quit it from the tray and try again");
     }
@@ -321,64 +416,75 @@ pub fn uninstall(dir: &Path) -> Result<()> {
     if let Ok(lnk) = start_menu_shortcut() {
         let _ = std::fs::remove_file(lnk);
     }
-    delete_after_exit(dir, &files)
+    remove_files(dir)?;
+    delete_exe_after_exit(dir)
 }
 
-/// The recorded file list, validated: plain relative paths inside `dir`.
-fn installed_files(dir: &Path) -> Result<Vec<String>> {
-    let list = dir.join(FILE_LIST);
-    let text = match std::fs::read_to_string(&list) {
-        Ok(t) => t,
-        // No list (an older install): remove only the program itself.
-        Err(_) => return Ok(vec![EXE_NAME.to_string()]),
-    };
-    let mut files = Vec::new();
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let safe = !line.contains("..")
-            && !line.contains(':')
-            && !line.contains('"')
-            && !line.starts_with(['/', '\\']);
-        if !safe {
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// True for symlinks, junctions and other reparse points.
+fn is_reparse_point(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+/// Deletes the known asset files (and legacy leftovers) directly, after
+/// checking that neither the folders nor the files are reparse points and
+/// that each file really lies inside `dir`.
+fn remove_files(dir: &Path) -> Result<()> {
+    let assets = dir.join("assets");
+    for d in [dir, assets.as_path()] {
+        if is_reparse_point(d) {
             bail!(
-                "refusing to uninstall: unexpected entry {line:?} in {}",
-                list.display()
+                "refusing to uninstall: {} is a link, not a folder",
+                d.display()
             );
         }
-        files.push(line.replace('/', "\\"));
     }
-    Ok(files)
+    let root = dir
+        .canonicalize()
+        .with_context(|| format!("resolving {}", dir.display()))?;
+    let files = ASSET_FILES
+        .iter()
+        .map(|f| assets.join(f))
+        .chain(LEGACY_FILES.iter().map(|f| dir.join(f)));
+    for path in files {
+        if std::fs::symlink_metadata(&path).is_err() {
+            continue; // not there
+        }
+        if is_reparse_point(&path) {
+            bail!("refusing to delete {}: it is a link", path.display());
+        }
+        let real = path.canonicalize()?;
+        if !real.starts_with(&root) {
+            bail!(
+                "refusing to delete {}: it is outside {}",
+                real.display(),
+                root.display()
+            );
+        }
+        std::fs::remove_file(&real).with_context(|| format!("deleting {}", real.display()))?;
+    }
+    let _ = std::fs::remove_dir(&assets); // only if empty
+    Ok(())
 }
 
-/// Deletes the installed `files`, the file list, then the folders they were in
-/// (only if empty), from a hidden `cmd` that first waits ~2 s for us to exit.
-fn delete_after_exit(dir: &Path, files: &[String]) -> Result<()> {
+/// Deletes ezhuthu.exe (this running process) and then the folder, if empty,
+/// from a hidden `cmd` that first waits ~2 s for us to exit.
+fn delete_exe_after_exit(dir: &Path) -> Result<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    if dir.parent().is_none() {
-        bail!(
-            "refusing to uninstall from a drive root ({})",
-            dir.display()
-        );
+    let exe = dir.join(EXE_NAME);
+    let (exe_s, dir_s) = (exe.display().to_string(), dir.display().to_string());
+    // Inside cmd quotes, a quote would end the string and '%' would expand.
+    if exe_s.contains(['"', '%']) || is_reparse_point(&exe) {
+        bail!("delete {} yourself to finish the uninstall", dir.display());
     }
-    let mut cmd = String::from("/d /c ping -n 3 127.0.0.1 >nul");
-    for f in files.iter().map(String::as_str).chain([FILE_LIST]) {
-        cmd += &format!(" & del /f /q \"{}\"", dir.join(f).display());
-    }
-    // Subfolders deepest first, then the install folder; `rd` without /s
-    // leaves any folder that still holds files the user put there.
-    let mut subdirs: Vec<PathBuf> = files
-        .iter()
-        .filter_map(|f| Path::new(f).parent().map(Path::to_path_buf))
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect();
-    subdirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    subdirs.dedup();
-    for d in subdirs {
-        cmd += &format!(" & rd \"{}\" 2>nul", dir.join(d).display());
-    }
-    cmd += &format!(" & rd \"{}\" 2>nul", dir.display());
     std::process::Command::new("cmd.exe")
-        .raw_arg(cmd)
+        .raw_arg(format!(
+            "/d /c ping -n 3 127.0.0.1 >nul & del /f /q \"{exe_s}\" & rd \"{dir_s}\" 2>nul"
+        ))
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .context("starting the cleanup process")?;
@@ -414,21 +520,53 @@ mod tests {
         ));
     }
 
+    /// The allowlist must match the assets the release ships (tools/assets.sha256).
     #[test]
-    fn file_list_rejects_paths_outside_the_folder() {
+    fn allowlist_matches_the_shipped_assets() {
+        let sums = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/assets.sha256");
+        let mut shipped: Vec<String> = std::fs::read_to_string(sums)
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.split_whitespace().nth(1))
+            .map(|n| n.trim_start_matches('*').to_string())
+            .collect();
+        let mut listed: Vec<String> = ASSET_FILES.iter().map(|s| s.to_string()).collect();
+        shipped.sort();
+        listed.sort();
+        assert_eq!(shipped, listed);
+    }
+
+    #[test]
+    fn removes_only_known_files_and_keeps_the_rest() {
         let dir = std::env::temp_dir().join(format!("ezhuthu-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        record_files(&dir, &["ezhuthu.exe", "assets/vocab_src.json"]).unwrap();
-        assert_eq!(
-            installed_files(&dir).unwrap(),
-            ["ezhuthu.exe", r"assets\vocab_src.json"]
-        );
-        for bad in [r"..\evil.txt", r"C:\Windows\x", r"\x", "a\"b"] {
-            record_files(&dir, &[bad]).unwrap();
-            assert!(installed_files(&dir).is_err(), "{bad} should be rejected");
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        for f in installable_files() {
+            std::fs::write(dir.join(&f), b"x").unwrap();
         }
+        std::fs::write(dir.join("keep.txt"), b"user file").unwrap();
+        std::fs::write(dir.join("assets/mine.txt"), b"user file").unwrap();
+        remove_files(&dir).unwrap();
+        for f in ASSET_FILES {
+            assert!(!dir.join("assets").join(f).exists(), "{f} should be gone");
+        }
+        assert!(dir.join("keep.txt").exists());
+        assert!(
+            dir.join("assets/mine.txt").exists(),
+            "folder with user files is kept"
+        );
+        assert!(
+            dir.join(EXE_NAME).exists(),
+            "the exe is deleted after exit, not here"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
-        // no list (older install): only the program itself
-        assert_eq!(installed_files(&dir).unwrap(), [EXE_NAME]);
+    }
+
+    #[test]
+    fn secures_a_folder_and_keeps_it_usable() {
+        let dir = std::env::temp_dir().join(format!("ezhuthu-acl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        secure_dir(&dir).unwrap();
+        std::fs::write(dir.join("f"), b"x").unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

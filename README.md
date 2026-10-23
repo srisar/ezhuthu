@@ -17,13 +17,14 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 
 ## Install
 
-Run `ezhuthu-setup-<version>.exe`. It installs for the current user only, with no administrator rights, into a folder you choose. The folder picker starts at `%LOCALAPPDATA%\Programs`, and an `ezhuthu` folder is created in the location you pick. Setup also:
+Run `ezhuthu-setup-<version>.exe`. It installs for the current user only, with no administrator rights. The setup window shows the install folder, by default `%LOCALAPPDATA%\Programs\ezhuthu`. Use **Browse…** to pick another location (an `ezhuthu` folder is created there) or type a path. Setup then:
+- restricts the install folder so only you, SYSTEM and Administrators can change it. A drive without permissions (FAT32/exFAT) is refused;
 - adds a Start Menu shortcut;
 - adds an entry in **Settings > Apps**, whose uninstall runs `ezhuthu.exe --uninstall`;
-- asks whether to start with Windows (change it later from the tray menu's **Start with Windows**);
+- sets **Start with Windows** if its checkbox is ticked (you can change it later from the tray menu);
 - starts the app.
 
-Running a newer setup updates an existing install in place, and settings in `%APPDATA%\ezhuthu` are kept. Uninstall removes only the files setup installed, listed in `install-files.txt`, so other files in a folder you picked are left alone. Unattended install: `ezhuthu-setup.exe --silent [--dir <folder>] [--autostart] [--no-launch]`. The setup isn't code-signed yet, so Windows SmartScreen may warn the first time. Choose **More info > Run anyway**.
+Running a newer setup updates an existing install in place, and settings in `%APPDATA%\ezhuthu` are kept. Uninstall deletes only ezhuthu's own files (a fixed list built into the program, after checking for links), so anything else in the folder is left alone. Unattended install: `ezhuthu-setup.exe --silent [--dir <folder>] [--autostart] [--no-launch]`. The setup isn't code-signed yet, so Windows SmartScreen may warn the first time. Choose **More info > Run anyway**.
 
 To build the installer (after `tools/fetch-assets.sh`):
 
