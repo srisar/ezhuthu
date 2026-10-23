@@ -56,7 +56,7 @@ cargo build --release -p ezhuthu
 
 When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start/search box.
 
-Change settings from the tray menu: **Settings...** sets the Tamil-mode hotkey, how text is inserted (typing, or pasting for apps that garble typed Tamil), suggestions per word and Start with Windows. Launching ezhuthu again while it is running also opens Settings. They are saved in `%APPDATA%\ezhuthu\config.toml`. The app looks for model files in `assets/` next to the exe. Dev builds (`dev` and `fast` profiles) also look in the workspace `assets/`.
+Change settings from the tray menu: **Settings...** has two tabs. **General** sets the Tamil-mode shortcut (one of four presets, or any custom combination), suggestions per word, how text is inserted (typing, or pasting for apps that garble typed Tamil) and Start with Windows. **About** shows the version and credits for the model and libraries. Launching ezhuthu again while it is running also opens Settings. They are saved in `%APPDATA%\ezhuthu\config.toml`. The app looks for model files in `assets/` next to the exe. Dev builds (`dev` and `fast` profiles) also look in the workspace `assets/`.
 
 ## Transliteration library and CLI (Rust)
 
