@@ -62,6 +62,7 @@ use crate::learned::Learned;
 use crate::popup::{Popup, View};
 use crate::settings;
 use crate::tray::{self, Tray};
+use crate::welcome;
 use crate::win::{error_box, instance};
 
 const WM_APP_TRAY: u32 = WM_APP + 1;
@@ -249,7 +250,11 @@ pub fn run() -> Result<()> {
             .notify("Settings file has an error (using defaults)", &e, true);
     }
     app.register_hotkeys();
+    let first_run = !app.config.welcome_shown;
     APP.with(|cell| *cell.borrow_mut() = Some(app));
+    if first_run {
+        open_welcome();
+    }
 
     let mut msg = MSG::default();
     // SAFETY: standard message loop on the thread that owns our windows.
@@ -944,7 +949,8 @@ impl App {
         }
         // Keys for our own Settings window (e.g. a new hotkey) go straight to it.
         // SAFETY: plain query.
-        if settings::hwnd().is_some_and(|h| unsafe { GetForegroundWindow() } == h) {
+        let fg = unsafe { GetForegroundWindow() };
+        if settings::hwnd() == Some(fg) || welcome::hwnd() == Some(fg) {
             return false;
         }
         let swallow = if ev.down {
@@ -1207,6 +1213,7 @@ fn on_tray(event: u32) {
     const TOGGLE: usize = 1;
     const SETTINGS: usize = 2;
     const QUIT: usize = 3;
+    const WELCOME: usize = 4;
     let toggle_label = if on {
         "Turn Tamil mode off"
     } else {
@@ -1217,6 +1224,7 @@ fn on_tray(event: u32) {
         (0, "-"),
         (TOGGLE, toggle_label),
         (SETTINGS, "Settings..."),
+        (WELCOME, "Welcome tour"),
         (0, "-"),
         (QUIT, "Quit"),
     ];
@@ -1224,6 +1232,7 @@ fn on_tray(event: u32) {
     match tray::menu(main, &items, &[]) {
         TOGGLE => toggle(),
         SETTINGS => open_settings(),
+        WELCOME => open_welcome(),
         QUIT => quit(),
         _ => {}
     }
@@ -1276,6 +1285,34 @@ fn suggest_words(key: &str) -> Vec<String> {
     xlit.transliterate(key)
         .map(|c| c.into_iter().map(|c| c.text).collect())
         .unwrap_or_default()
+}
+
+/// Opens the welcome tour, with the user's shortcuts and popup theme.
+fn open_welcome() {
+    let Some(info) = with_app(|a| welcome::Info {
+        hotkey: a.config.hotkey.clone(),
+        convert_hotkey: a.config.convert_hotkey.clone(),
+        dark: a.config.theme.is_dark(),
+    }) else {
+        return;
+    };
+    welcome::open(info, welcome_closed);
+}
+
+/// The tour closed: it won't open by itself again; "Start typing" turns
+/// Tamil mode on.
+fn welcome_closed(start_typing: bool) {
+    with_app(|a| {
+        if !a.config.welcome_shown {
+            a.config.welcome_shown = true;
+            if let Err(e) = a.config.save(&a.config_path) {
+                eprintln!("settings not saved: {e:#}");
+            }
+        }
+        if start_typing {
+            a.set_mode(true);
+        }
+    });
 }
 
 fn settings_closed() {

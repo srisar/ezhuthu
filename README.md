@@ -53,6 +53,8 @@ Setup adds a Start Menu shortcut and an entry in **Settings > Apps**, then start
 
 ## Using Ezhuthu
 
+The first time Ezhuthu starts, a short welcome tour shows each feature with an animated example. Open it again any time from the tray menu: **Welcome tour**.
+
 Ezhuthu lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray icon shows the Ezhuthu logo when it's on and turns grey when it's off. While it's on, type Tamil in English letters, a word at a time. A popup at the cursor shows the suggestions:
 
 | Key (while a word is in progress) | Action |
@@ -214,6 +216,12 @@ uv run make_icons.py "work/AnekTamil[wdth,wght].ttf" ../../crates/app/icons --pr
 
 The letter's outline comes from Anek Tamil ExtraBold (SIL Open Font License 1.1).
 
+The welcome tour's last card shows the Gravitide logo, rendered from `crates/app/logo/gravitide-logo-full.svg` into two images (for light and dark themes) that the app embeds. To redraw them, run this from `tools/icons`:
+
+```bash
+uv run --with resvg-py make_logo.py ../../crates/app/logo/gravitide-logo-full.svg
+```
+
 ## Credits
 
 - **Transliteration model:** [IndicXlit](https://github.com/AI4Bharat/IndicXlit) by AI4Bharat, checkpoint `indicxlit-en-indic-v1.0`. MIT license, covering both code and models. Madhani et al., *Aksharantar: Open Indic-language Transliteration datasets and models for the Next Billion Users* (2022).
@@ -223,6 +231,6 @@ The letter's outline comes from Anek Tamil ExtraBold (SIL Open Font License 1.1)
 
 ## License
 
-Ezhuthu is free and open source under the [MIT License](LICENSE). The model, word data, tract and Anek Tamil keep their own licenses, listed above.
+Ezhuthu is free and open source under the [MIT License](LICENSE). The model, word data, tract and Anek Tamil keep their own licenses, listed above. The Gravitide name and logo belong to Gravitide and are not covered by the MIT License.
 
 <p align="center">Built by <a href="https://gravitide.dev">Gravitide</a> from Sri Lanka with Love ❤️</p>

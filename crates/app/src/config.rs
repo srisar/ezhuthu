@@ -55,6 +55,8 @@ pub struct Config {
     /// Learn the suggestions the user picks (see `learned`).
     pub remember_picks: bool,
     pub theme: Theme,
+    /// The welcome tour has been shown (it opens by itself until then).
+    pub welcome_shown: bool,
     pub assets_dir: Option<PathBuf>,
 }
 
@@ -67,6 +69,7 @@ impl Default for Config {
             beam: ezhuthu_xlit::DEFAULT_BEAM,
             remember_picks: true,
             theme: Theme::System,
+            welcome_shown: false,
             assets_dir: None,
         }
     }
@@ -136,6 +139,9 @@ impl Config {
              # \"light\" or \"dark\".\n\
              theme = {}\n\
              \n\
+             # Set to false to see the welcome tour again at the next start.\n\
+             welcome_shown = {}\n\
+             \n\
              # Folder with the model files. Default: \"assets\" next to ezhuthu.exe.\n\
              {assets}",
             quote(&self.hotkey),
@@ -144,6 +150,7 @@ impl Config {
             self.beam,
             self.remember_picks,
             quote(self.theme.as_str()),
+            self.welcome_shown,
         )
     }
 
@@ -213,6 +220,7 @@ mod tests {
             beam: 7,
             remember_picks: false,
             theme: Theme::Dark,
+            welcome_shown: true,
             assets_dir: Some(PathBuf::from(r#"D:\it's "odd"\assets"#)),
         };
         assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
