@@ -324,15 +324,7 @@ pub fn secure_dir(dir: &Path) -> Result<()> {
         );
     }
     let sid = current_user_sid()?;
-    let owner = owner_sid(dir)?;
-    const SYSTEM: &str = "S-1-5-18";
-    const ADMINISTRATORS: &str = "S-1-5-32-544";
-    if owner != sid && owner != SYSTEM && owner != ADMINISTRATORS {
-        bail!(
-            "{} belongs to another account ({owner}); choose a folder you created yourself",
-            dir.display()
-        );
-    }
+    check_owner(dir, &sid)?;
     let sddl = format!("D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
     // SAFETY: the security descriptor allocated by the conversion is freed
     // with LocalFree; the DACL pointer points into it and is only used before.
@@ -369,6 +361,80 @@ pub fn secure_dir(dir: &Path) -> Result<()> {
                 err.0
             );
         }
+    }
+    Ok(())
+}
+
+/// Fails unless `path` is owned by the user `sid`, SYSTEM or Administrators.
+fn check_owner(path: &Path, sid: &str) -> Result<()> {
+    const SYSTEM: &str = "S-1-5-18";
+    const ADMINISTRATORS: &str = "S-1-5-32-544";
+    let owner = owner_sid(path)?;
+    if owner != sid && owner != SYSTEM && owner != ADMINISTRATORS {
+        bail!(
+            "{} belongs to another account ({owner}); choose a folder you created yourself",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Checks a folder before installing into it:
+/// - no folder on the path is a link (junction or symlink);
+/// - it holds nothing but ezhuthu's own files (or leftovers of an interrupted
+///   update), none of them links, all owned by this user, SYSTEM or
+///   Administrators.
+///
+/// So setup never adopts, or re-permissions, files someone else put there.
+pub fn check_install_dir(dir: &Path) -> Result<()> {
+    if let Some(link) = dir.ancestors().find(|a| is_reparse_point(a)) {
+        bail!(
+            "{} is a link (junction or symlink); choose a real folder",
+            link.display()
+        );
+    }
+    if !dir.exists() {
+        return Ok(());
+    }
+    let sid = current_user_sid()?;
+    check_owner(dir, &sid)?;
+    let known = |name: &str, list: &[&str]| {
+        let name = name.to_ascii_lowercase();
+        list.iter().any(|k| {
+            let k = k.to_ascii_lowercase();
+            // Interrupted updates leave "<stem>.partial" files behind.
+            let partial = Path::new(&k).with_extension("partial");
+            name == k || Path::new(&name) == partial
+        })
+    };
+    let top: Vec<&str> = [EXE_NAME, "assets"]
+        .into_iter()
+        .chain(LEGACY_FILES.iter().copied())
+        .collect();
+    let mut entries: Vec<(PathBuf, bool)> = Vec::new();
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        entries.push((e.path(), known(&name, &top)));
+    }
+    let assets = dir.join("assets");
+    if assets.is_dir() && !is_reparse_point(&assets) {
+        for e in std::fs::read_dir(&assets)?.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            entries.push((e.path(), known(&name, ASSET_FILES)));
+        }
+    }
+    for (path, ours) in entries {
+        if !ours {
+            bail!(
+                "{} already contains other files ({}); choose an empty folder",
+                dir.display(),
+                path.display()
+            );
+        }
+        if is_reparse_point(&path) {
+            bail!("{} is a link; choose another folder", path.display());
+        }
+        check_owner(&path, &sid)?;
     }
     Ok(())
 }
@@ -626,6 +692,30 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn install_dir_must_be_new_empty_or_ours() {
+        let dir = std::env::temp_dir().join(format!("ezhuthu-check-{}", std::process::id()));
+        assert!(
+            check_install_dir(&dir).is_ok(),
+            "a folder that doesn't exist yet"
+        );
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        assert!(check_install_dir(&dir).is_ok(), "an empty folder");
+        for f in installable_files() {
+            std::fs::write(dir.join(&f), b"x").unwrap();
+        }
+        std::fs::write(dir.join("assets/vocab_src.partial"), b"x").unwrap();
+        assert!(
+            check_install_dir(&dir).is_ok(),
+            "an earlier install of ours"
+        );
+        std::fs::write(dir.join("assets/other.dll"), b"x").unwrap();
+        assert!(check_install_dir(&dir).is_err(), "a stranger in assets");
+        std::fs::remove_file(dir.join("assets/other.dll")).unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        assert!(check_install_dir(&dir).is_err(), "a stranger at the top");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     #[test]
     fn refuses_to_secure_a_junction() {
         let base = std::env::temp_dir().join(format!("ezhuthu-junction-{}", std::process::id()));

@@ -352,6 +352,35 @@ fn on_install(hwnd: HWND, updating: bool) {
             return;
         }
     }
+    if let Err(e) = install::check_install_dir(&dir) {
+        message(hwnd, &format!("{e:#}"), MB_OK | MB_ICONWARNING);
+        return;
+    }
+    // Outside the user's own folder, other accounts on this PC may be able to
+    // move the folder aside and plant a look-alike ezhuthu.exe.
+    let in_profile = std::env::var_os("USERPROFILE").is_some_and(|home| {
+        let (d, h) = (
+            dir.to_string_lossy().to_lowercase(),
+            home.to_string_lossy().to_lowercase(),
+        );
+        d.starts_with(&(h.trim_end_matches('\\').to_string() + "\\"))
+    });
+    if !updating
+        && !in_profile
+        && !message(
+            hwnd,
+            &format!(
+                "{} is outside your user folder.\n\nDepending on how this PC is set up, other \
+                 accounts may be able to replace ezhuthu's files there, and ezhuthu runs as \
+                 you. The default location inside your user folder is safer.\n\n\
+                 Install here anyway?",
+                dir.display()
+            ),
+            MB_YESNO | MB_ICONWARNING,
+        )
+    {
+        return;
+    }
     if let Err(e) = crate::ensure_writable(&dir) {
         message(
             hwnd,

@@ -117,6 +117,7 @@ fn run(opts: &Options) -> Result<()> {
     if !install::close_running_app(Duration::from_secs(5)) {
         bail!("ezhuthu is running and didn't close; quit it from the tray and run setup again");
     }
+    install::check_install_dir(&dir)?;
     ensure_writable(&dir)?;
     install::secure_dir(&dir)?;
     let bytes = write_files(&dir)?;
