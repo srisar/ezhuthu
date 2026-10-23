@@ -10,6 +10,7 @@ mod app;
 mod caret;
 mod compose;
 mod config;
+mod convert;
 mod engine;
 mod focus;
 mod hotkey;

@@ -47,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
-use crate::config::InsertMode;
+use crate::config::{Config, InsertMode};
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::win::instance;
 
@@ -59,6 +59,8 @@ const ID_AUTOSTART: i32 = 14;
 const ID_TABS: i32 = 15;
 const ID_REMEMBER: i32 = 16;
 const ID_FORGET: i32 = 17;
+const ID_CONVERT_ON: i32 = 18;
+const ID_CONVERT_KEY: i32 = 19;
 /// Radio buttons for the presets, then "Custom".
 const ID_PRESET: i32 = 20;
 const ID_CUSTOM: i32 = ID_PRESET + PRESETS.len() as i32;
@@ -82,6 +84,8 @@ const REPO_URL: &str = "https://github.com/srisar/ezhuthu";
 #[derive(Debug, Clone, PartialEq)]
 pub struct Values {
     pub hotkey: String,
+    /// Empty: convert selection is off.
+    pub convert_hotkey: String,
     pub insert_mode: InsertMode,
     pub beam: usize,
     pub remember_picks: bool,
@@ -107,10 +111,12 @@ struct Window {
     logo: Option<HICON>,
     /// The tab page's background, behind the labels and buttons on it.
     page_brush: HBRUSH,
-    /// The custom combination shown in the key box (updated as keys are pressed).
+    /// The combinations shown in the key boxes (updated as keys are pressed):
+    /// Tamil mode's custom one, and convert selection's.
     hotkey: String,
+    convert: String,
     /// Controls of each tab, shown or hidden as the tab changes.
-    pages: [Vec<HWND>; 2],
+    pages: [Vec<HWND>; 3],
     apply: Apply,
     forget: fn() -> Result<(), String>,
     on_close: fn(),
@@ -190,13 +196,13 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
         title_lf.lfWeight = 700;
         let title_font = CreateFontIndirectW(&title_lf);
 
-        // Client area 500 x 508 (96-DPI units), centred on the primary monitor.
+        // Client area 500 x 476 (96-DPI units), centred on the primary monitor.
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut r = RECT {
             left: 0,
             top: 0,
             right: s(500),
-            bottom: s(508),
+            bottom: s(476),
         };
         let _ = AdjustWindowRectExForDpi(&mut r, style, false, WINDOW_EX_STYLE(0), dpi);
         let (w, h) = (r.right - r.left, r.bottom - r.top);
@@ -280,9 +286,9 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_CLIPSIBLINGS.0,
             none,
             ID_TABS,
-            (12, 10, 476, 446),
+            (12, 10, 476, 414),
         )?;
-        for (i, name) in ["General", "About"].iter().enumerate() {
+        for (i, name) in ["General", "Shortcuts", "About"].iter().enumerate() {
             let mut text: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
             let item = TCITEMW {
                 mask: TCIF_TEXT,
@@ -318,66 +324,14 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
 
         // ---------------------------------------------------------------- General
         let mut general = Vec::new();
-        general.extend(section("Tamil mode shortcut", 48)?);
-        general.push(muted(
-            "Press it anywhere to turn Tamil typing on or off.",
-            (X, 72, 420, 18),
-        )?);
-        for (i, (keys, note)) in PRESETS.iter().enumerate() {
-            let y = 96 + 24 * i as i32;
-            let first = if i == 0 { WS_GROUP.0 | tab } else { 0 };
-            general.push(child(
-                w!("BUTTON"),
-                keys,
-                first | BS_AUTORADIOBUTTON as u32,
-                none,
-                ID_PRESET + i as i32,
-                (X, y, 150, 22),
-            )?);
-            if !note.is_empty() {
-                general.push(muted(note, (X + 160, y + 2, 260, 18))?);
-            }
-        }
-        let custom_y = 96 + 24 * PRESETS.len() as i32;
-        general.push(child(
-            w!("BUTTON"),
-            "Custom",
-            BS_AUTORADIOBUTTON as u32,
-            none,
-            ID_CUSTOM,
-            (X, custom_y, 80, 22),
-        )?);
-        // A read-only edit that records the pressed combination (the stock
-        // hotkey control refuses Space, so Ctrl+Space couldn't be chosen).
-        let preset = preset_index(&values.hotkey);
-        let custom_text = if preset.is_none() {
-            values.hotkey.clone()
-        } else {
-            String::new()
-        };
-        let key_box = child(
-            w!("EDIT"),
-            &custom_text,
-            tab | WS_GROUP.0 | ES_READONLY as u32,
-            WS_EX_CLIENTEDGE,
-            ID_HOTKEY,
-            (X + 92, custom_y - 2, 180, 26),
-        )?;
-        let _ = SetWindowSubclass(key_box, Some(key_box_proc), 1, 0);
-        general.push(key_box);
-        general.push(muted(
-            "click, then press keys",
-            (X + 282, custom_y + 2, 150, 18),
-        )?);
-
-        general.extend(section("Typing", 232)?);
+        general.extend(section("Typing", 48)?);
         general.push(child(
             w!("STATIC"),
             "Suggestions per word",
             0,
             none,
             -1,
-            (X, 258, 200, 20),
+            (X, 74, 200, 20),
         )?);
         let beam = child(
             w!("COMBOBOX"),
@@ -385,7 +339,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_GROUP.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32,
             none,
             ID_BEAM,
-            (RIGHT - 80, 254, 80, 200),
+            (RIGHT - 80, 70, 80, 200),
         )?;
         general.push(beam);
         general.push(child(
@@ -394,7 +348,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             0,
             none,
             -1,
-            (X, 288, 200, 20),
+            (X, 104, 200, 20),
         )?);
         for (i, (label, note)) in [
             ("Typing the characters", "works in most apps"),
@@ -403,7 +357,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
         .iter()
         .enumerate()
         {
-            let y = 310 + 24 * i as i32;
+            let y = 126 + 24 * i as i32;
             let first = if i == 0 { WS_GROUP.0 | tab } else { 0 };
             general.push(child(
                 w!("BUTTON"),
@@ -421,7 +375,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_REMEMBER,
-            (X, 364, 270, 22),
+            (X, 180, 270, 22),
         )?);
         general.push(child(
             w!("BUTTON"),
@@ -429,18 +383,100 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | BS_PUSHBUTTON as u32,
             none,
             ID_FORGET,
-            (RIGHT - 160, 362, 160, 26),
+            (RIGHT - 160, 178, 160, 26),
         )?);
 
-        general.extend(section("Startup", 400)?);
+        general.extend(section("Startup", 216)?);
         general.push(child(
             w!("BUTTON"),
             "Start Ezhuthu when I sign in to Windows",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_AUTOSTART,
-            (X, 424, 420, 22),
+            (X, 240, 420, 22),
         )?);
+
+        // -------------------------------------------------------------- Shortcuts
+        let mut shortcuts = Vec::new();
+        shortcuts.extend(section("Tamil mode", 48)?);
+        shortcuts.push(muted(
+            "Press it anywhere to turn Tamil typing on or off.",
+            (X, 72, 420, 18),
+        )?);
+        for (i, (keys, note)) in PRESETS.iter().enumerate() {
+            let y = 96 + 24 * i as i32;
+            let first = if i == 0 { WS_GROUP.0 | tab } else { 0 };
+            shortcuts.push(child(
+                w!("BUTTON"),
+                keys,
+                first | BS_AUTORADIOBUTTON as u32,
+                none,
+                ID_PRESET + i as i32,
+                (X, y, 150, 22),
+            )?);
+            if !note.is_empty() {
+                shortcuts.push(muted(note, (X + 160, y + 2, 260, 18))?);
+            }
+        }
+        let custom_y = 96 + 24 * PRESETS.len() as i32;
+        shortcuts.push(child(
+            w!("BUTTON"),
+            "Custom",
+            BS_AUTORADIOBUTTON as u32,
+            none,
+            ID_CUSTOM,
+            (X, custom_y, 80, 22),
+        )?);
+        // Read-only edits that record the pressed combination (the stock
+        // hotkey control refuses Space, so Ctrl+Space couldn't be chosen).
+        let key_box = |text: &str, id: i32, x: i32, y: i32| -> windows::core::Result<HWND> {
+            let ctl = child(
+                w!("EDIT"),
+                text,
+                tab | WS_GROUP.0 | ES_READONLY as u32,
+                WS_EX_CLIENTEDGE,
+                id,
+                (x, y, 180, 26),
+            )?;
+            let _ = SetWindowSubclass(ctl, Some(key_box_proc), 1, 0);
+            Ok(ctl)
+        };
+        let preset = preset_index(&values.hotkey);
+        let custom_text = if preset.is_none() {
+            values.hotkey.clone()
+        } else {
+            String::new()
+        };
+        let custom_box = key_box(&custom_text, ID_HOTKEY, X + 92, custom_y - 2)?;
+        shortcuts.push(custom_box);
+        shortcuts.push(muted(
+            "click, then press keys",
+            (X + 282, custom_y + 2, 150, 18),
+        )?);
+
+        shortcuts.extend(section("Convert selection", 232)?);
+        shortcuts.push(muted(
+            "Select text typed in English letters in any app, then press this to",
+            (X, 256, 440, 18),
+        )?);
+        shortcuts.push(muted("turn it into Tamil.", (X, 274, 440, 18))?);
+        shortcuts.push(child(
+            w!("BUTTON"),
+            "Shortcut",
+            tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
+            none,
+            ID_CONVERT_ON,
+            (X, 302, 84, 22),
+        )?);
+        let convert_on = !values.convert_hotkey.is_empty();
+        let convert_text = if convert_on {
+            values.convert_hotkey.clone()
+        } else {
+            Config::default().convert_hotkey
+        };
+        let convert_box = key_box(&convert_text, ID_CONVERT_KEY, X + 92, 300)?;
+        shortcuts.push(convert_box);
+        shortcuts.push(muted("click, then press keys", (X + 282, 304, 150, 18))?);
 
         // ---------------------------------------------------------------- About
         let mut about = Vec::new();
@@ -547,7 +583,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
                 )?);
             }
         }
-        for ctl in &about {
+        for ctl in shortcuts.iter().chain(&about) {
             let _ = ShowWindow(*ctl, SW_HIDE);
         }
 
@@ -557,7 +593,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_GROUP.0 | BS_DEFPUSHBUTTON as u32,
             none,
             IDOK.0,
-            (320, 468, 80, 28),
+            (320, 436, 80, 28),
         )?;
         child(
             w!("BUTTON"),
@@ -565,13 +601,13 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | BS_PUSHBUTTON as u32,
             none,
             IDCANCEL.0,
-            (408, 468, 80, 28),
+            (408, 436, 80, 28),
         )?;
 
         // Current values.
         let selected = preset.map_or(ID_CUSTOM, |i| ID_PRESET + i as i32);
         let _ = CheckDlgButton(hwnd, selected, BST_CHECKED);
-        let _ = EnableWindow(key_box, preset.is_none());
+        let _ = EnableWindow(custom_box, preset.is_none());
         let radio = if values.insert_mode == InsertMode::Clipboard {
             ID_PASTE
         } else {
@@ -594,6 +630,8 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
         let check = |on: bool| if on { BST_CHECKED } else { BST_UNCHECKED };
         let _ = CheckDlgButton(hwnd, ID_REMEMBER, check(values.remember_picks));
         let _ = CheckDlgButton(hwnd, ID_AUTOSTART, check(values.autostart));
+        let _ = CheckDlgButton(hwnd, ID_CONVERT_ON, check(convert_on));
+        let _ = EnableWindow(convert_box, convert_on);
 
         WINDOW.with(|cell| {
             *cell.borrow_mut() = Some(Window {
@@ -603,7 +641,8 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
                 logo,
                 page_brush,
                 hotkey: custom_text,
-                pages: [general, about],
+                convert: convert_text,
+                pages: [general, shortcuts, about],
                 apply: actions.apply,
                 forget: actions.forget,
                 on_close: actions.on_close,
@@ -611,7 +650,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
         });
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(GetDlgItem(Some(hwnd), selected).ok());
+        let _ = SetFocus(Some(beam));
     }
     Ok(())
 }
@@ -646,7 +685,7 @@ fn checked(hwnd: HWND, id: i32) -> bool {
 }
 
 /// Reads the controls into `Values`; Err if Custom is chosen but empty.
-fn read(hwnd: HWND, custom: String) -> Result<Values, String> {
+fn read(hwnd: HWND, custom: String, convert: String) -> Result<Values, String> {
     let hotkey = match (0..PRESETS.len()).find(|&i| checked(hwnd, ID_PRESET + i as i32)) {
         Some(i) => PRESETS[i].0.to_string(),
         None if custom.is_empty() => {
@@ -655,6 +694,13 @@ fn read(hwnd: HWND, custom: String) -> Result<Values, String> {
             );
         }
         None => custom,
+    };
+    let convert_hotkey = match checked(hwnd, ID_CONVERT_ON) {
+        false => String::new(),
+        true if convert.is_empty() => {
+            return Err("Click the convert selection box and press the keys you want.".into());
+        }
+        true => convert,
     };
     let insert_mode = if checked(hwnd, ID_PASTE) {
         InsertMode::Clipboard
@@ -669,6 +715,7 @@ fn read(hwnd: HWND, custom: String) -> Result<Values, String> {
     let beam = (BEAM_CHOICES.start() + index).min(*BEAM_CHOICES.end());
     Ok(Values {
         hotkey,
+        convert_hotkey,
         insert_mode,
         beam,
         remember_picks: checked(hwnd, ID_REMEMBER),
@@ -702,12 +749,14 @@ fn on_forget(hwnd: HWND) {
 }
 
 fn on_ok(hwnd: HWND) {
-    let Some((custom, apply)) =
-        WINDOW.with(|w| w.borrow().as_ref().map(|w| (w.hotkey.clone(), w.apply)))
-    else {
+    let Some((custom, convert, apply)) = WINDOW.with(|w| {
+        let w = w.borrow();
+        let w = w.as_ref()?;
+        Some((w.hotkey.clone(), w.convert.clone(), w.apply))
+    }) else {
         return;
     };
-    match read(hwnd, custom).and_then(|v| apply(&v)) {
+    match read(hwnd, custom, convert).and_then(|v| apply(&v)) {
         // SAFETY: closing our own window.
         Ok(()) => {
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -810,6 +859,14 @@ unsafe extern "system" fn window_proc(
                 }
                 i if (ID_PRESET..=ID_CUSTOM).contains(&i) => on_shortcut_choice(hwnd, i),
                 ID_FORGET => on_forget(hwnd),
+                ID_CONVERT_ON => {
+                    // SAFETY: enabling our own control.
+                    unsafe {
+                        if let Ok(key_box) = GetDlgItem(Some(hwnd), ID_CONVERT_KEY) {
+                            let _ = EnableWindow(key_box, checked(hwnd, ID_CONVERT_ON));
+                        }
+                    }
+                }
                 _ => {}
             }
             LRESULT(0)
@@ -838,7 +895,7 @@ unsafe extern "system" fn window_proc(
             unsafe {
                 SetBkMode(dc, TRANSPARENT);
                 let brush = match GetDlgCtrlID(HWND(lparam.0 as *mut _)) {
-                    ID_HOTKEY => None,
+                    ID_HOTKEY | ID_CONVERT_KEY => None,
                     ID_MUTED => {
                         SetTextColor(dc, COLORREF(GetSysColor(COLOR_GRAYTEXT)));
                         page
@@ -930,7 +987,12 @@ fn record(key_box: HWND, vk: u32) {
     let _ = unsafe { SetWindowTextW(key_box, &HSTRING::from(text.as_str())) };
     WINDOW.with(|w| {
         if let Some(w) = w.borrow_mut().as_mut() {
-            w.hotkey = text;
+            // SAFETY: plain query of our own control.
+            if unsafe { GetDlgCtrlID(key_box) } == ID_CONVERT_KEY {
+                w.convert = text;
+            } else {
+                w.hotkey = text;
+            }
         }
     });
 }
@@ -953,7 +1015,7 @@ mod tests {
 
     /// Opens the window for a few seconds (for screenshots); Cancel or the
     /// timeout closes it. Run with: cargo test -p ezhuthu settings_preview -- --ignored
-    /// (EZHUTHU_PREVIEW_TAB=1 starts on the About tab.)
+    /// (EZHUTHU_PREVIEW_TAB=1 starts on the Shortcuts tab, 2 on About.)
     #[test]
     #[ignore]
     fn settings_preview() {
@@ -966,6 +1028,7 @@ mod tests {
         }
         let values = Values {
             hotkey: "Ctrl+Alt+T".into(),
+            convert_hotkey: "Ctrl+Alt+Shift+T".into(),
             insert_mode: InsertMode::Unicode,
             beam: 5,
             remember_picks: true,
@@ -982,8 +1045,12 @@ mod tests {
                 on_close: closed,
             },
         );
-        if std::env::var("EZHUTHU_PREVIEW_TAB").as_deref() == Ok("1") {
-            show_page(1);
+        let start_tab = std::env::var("EZHUTHU_PREVIEW_TAB")
+            .ok()
+            .and_then(|t| t.parse::<usize>().ok())
+            .filter(|&t| (1..=2).contains(&t));
+        if let Some(t) = start_tab {
+            show_page(t);
             // SAFETY: selecting the About tab on our own tab control.
             unsafe {
                 if let Some(h) = hwnd()
@@ -992,7 +1059,7 @@ mod tests {
                     SendMessageW(
                         tabs,
                         windows::Win32::UI::Controls::TCM_SETCURSEL,
-                        Some(WPARAM(1)),
+                        Some(WPARAM(t)),
                         None,
                     );
                 }

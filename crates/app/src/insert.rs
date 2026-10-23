@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL, HWND};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, OpenClipboard,
-    RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+    GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
@@ -43,6 +43,11 @@ pub enum Out {
         up: bool,
         extended: bool,
     },
+    /// Ctrl+C, to copy the selection (convert selection).
+    Copy,
+    /// Text pasted over the selection whatever the insert mode, keeping line
+    /// breaks and tabs (convert selection's result).
+    Paste(String),
 }
 
 /// Sends `items` in order. Returns how many events were injected (each of
@@ -51,7 +56,7 @@ pub fn deliver(items: &[Out], mode: InsertMode) -> (usize, Result<()>) {
     let mut injected = 0;
     let mut batch = Vec::new();
     for item in items {
-        match item {
+        let pasted = match item {
             Out::Key {
                 vk,
                 scan,
@@ -66,19 +71,27 @@ pub fn deliver(items: &[Out], mode: InsertMode) -> (usize, Result<()>) {
                     flags |= KEYEVENTF_EXTENDEDKEY;
                 }
                 batch.push(key(VIRTUAL_KEY(*vk), *scan, flags));
+                None
             }
-            Out::Text(text) => match mode {
-                InsertMode::Unicode => batch.extend(unicode_events(text)),
-                InsertMode::Clipboard => {
-                    // Keys queued before this text must land before the paste.
-                    if let Err(e) = send(&std::mem::take(&mut batch), &mut injected) {
-                        return (injected, Err(e));
-                    }
-                    if let Err(e) = paste(text, &mut injected) {
-                        return (injected, Err(e));
-                    }
-                }
-            },
+            Out::Copy => {
+                batch.extend(ctrl_plus(b'C'));
+                None
+            }
+            Out::Text(text) if mode == InsertMode::Unicode => {
+                batch.extend(unicode_events(text));
+                None
+            }
+            Out::Text(text) => Some(printable(text)),
+            Out::Paste(text) => Some(keep_lines(text)),
+        };
+        if let Some(text) = pasted {
+            // Keys queued before this text must land before the paste.
+            if let Err(e) = send(&std::mem::take(&mut batch), &mut injected) {
+                return (injected, Err(e));
+            }
+            if let Err(e) = paste(&text, &mut injected) {
+                return (injected, Err(e));
+            }
         }
     }
     let result = send(&batch, &mut injected);
@@ -92,7 +105,8 @@ pub fn event_count(items: &[Out], mode: InsertMode) -> usize {
         .map(|item| match (item, mode) {
             (Out::Key { .. }, _) => 1,
             (Out::Text(t), InsertMode::Unicode) => 2 * printable(t).encode_utf16().count(),
-            (Out::Text(_), InsertMode::Clipboard) => 4, // Ctrl down, V down, V up, Ctrl up
+            // Ctrl down, C/V down, C/V up, Ctrl up
+            (Out::Text(_), InsertMode::Clipboard) | (Out::Copy | Out::Paste(_), _) => 4,
         })
         .sum()
 }
@@ -132,6 +146,24 @@ fn printable(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// Like `printable`, but keeps line breaks and tabs (pasted, never typed).
+fn keep_lines(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\r' | '\n' | '\t'))
+        .collect()
+}
+
+/// Ctrl + `letter`, down and up.
+fn ctrl_plus(letter: u8) -> [INPUT; 4] {
+    let k = VIRTUAL_KEY(letter as u16);
+    [
+        key(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)),
+        key(k, 0, KEYBD_EVENT_FLAGS(0)),
+        key(k, 0, KEYEVENTF_KEYUP),
+        key(VK_CONTROL, 0, KEYEVENTF_KEYUP),
+    ]
+}
+
 /// One key-down/key-up pair per UTF-16 unit.
 fn unicode_events(text: &str) -> Vec<INPUT> {
     printable(text)
@@ -145,29 +177,63 @@ fn unicode_events(text: &str) -> Vec<INPUT> {
         .collect()
 }
 
-/// Puts `text` on the clipboard, sends Ctrl+V, then puts back what was there.
+/// Puts `text` (already filtered) on the clipboard, sends Ctrl+V, then puts
+/// back what was there.
 ///
 /// Every memory-backed format is saved and restored, including the privacy
 /// markers password managers set, so their entries keep those markers. The
 /// temporary Tamil text is itself kept out of clipboard history and cloud sync.
 fn paste(text: &str, injected: &mut usize) -> Result<()> {
     let saved = Clipboard::open()?.save();
-    let mut temp = vec![(CF_UNICODETEXT.0 as u32, utf16_bytes(&printable(text)))];
+    let mut temp = vec![(CF_UNICODETEXT.0 as u32, utf16_bytes(text))];
     temp.extend(private_markers());
     Clipboard::open()?.replace(&temp)?;
-    let v = VIRTUAL_KEY(b'V' as u16);
-    send(
-        &[
-            key(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)),
-            key(v, 0, KEYBD_EVENT_FLAGS(0)),
-            key(v, 0, KEYEVENTF_KEYUP),
-            key(VK_CONTROL, 0, KEYEVENTF_KEYUP),
-        ],
-        injected,
-    )?;
+    send(&ctrl_plus(b'V'), injected)?;
     // Give the target time to read the clipboard before restoring it.
     std::thread::sleep(Duration::from_millis(200));
     Clipboard::open()?.replace(&saved)
+}
+
+/// What was on the clipboard, kept to put back later.
+pub struct SavedClipboard(Vec<(u32, Vec<u8>)>);
+
+/// Saves the clipboard's contents (see `Clipboard::save`).
+pub fn save_clipboard() -> Result<SavedClipboard> {
+    Ok(SavedClipboard(Clipboard::open()?.save()))
+}
+
+/// Puts saved contents back on the clipboard.
+pub fn restore_clipboard(saved: &SavedClipboard) -> Result<()> {
+    Clipboard::open()?.replace(&saved.0)
+}
+
+/// Changes whenever anything is put on the clipboard.
+pub fn clipboard_sequence() -> u32 {
+    // SAFETY: plain query.
+    unsafe { GetClipboardSequenceNumber() }
+}
+
+/// The clipboard's text, if it holds any.
+pub fn clipboard_text() -> Result<Option<String>> {
+    let _open = Clipboard::open()?;
+    // SAFETY: the clipboard is open; the HGLOBAL is locked, read within its
+    // GlobalSize (up to the first NUL) and unlocked.
+    unsafe {
+        let Ok(h) = GetClipboardData(CF_UNICODETEXT.0 as u32) else {
+            return Ok(None);
+        };
+        let hglobal = HGLOBAL(h.0);
+        let units = GlobalSize(hglobal) / 2;
+        let p = GlobalLock(hglobal) as *const u16;
+        if p.is_null() {
+            return Ok(None);
+        }
+        let all = std::slice::from_raw_parts(p, units);
+        let len = all.iter().position(|&u| u == 0).unwrap_or(units);
+        let text = String::from_utf16_lossy(&all[..len]);
+        let _ = GlobalUnlock(hglobal);
+        Ok(Some(text))
+    }
 }
 
 fn utf16_bytes(text: &str) -> Vec<u8> {

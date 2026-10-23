@@ -18,6 +18,8 @@ pub enum InsertMode {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub hotkey: String,
+    /// Converts the selected text to Tamil (see `convert`); empty: off.
+    pub convert_hotkey: String,
     pub insert_mode: InsertMode,
     pub beam: usize,
     /// Learn the suggestions the user picks (see `learned`).
@@ -29,6 +31,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "Ctrl+Alt+T".into(),
+            convert_hotkey: "Ctrl+Alt+Shift+T".into(),
             insert_mode: InsertMode::Unicode,
             beam: ezhuthu_xlit::DEFAULT_BEAM,
             remember_picks: true,
@@ -82,6 +85,10 @@ impl Config {
              # Turns Tamil mode on and off: Ctrl / Alt / Shift / Win + a key.\n\
              hotkey = {}\n\
              \n\
+             # Converts the selected text (English letters) to Tamil, in any app.\n\
+             # Empty (\"\") turns it off.\n\
+             convert_hotkey = {}\n\
+             \n\
              # How text reaches the app: \"unicode\" types the characters (default);\n\
              # \"clipboard\" pastes with Ctrl+V, for apps that garble typed Tamil.\n\
              insert_mode = {}\n\
@@ -96,6 +103,7 @@ impl Config {
              # Folder with the model files. Default: \"assets\" next to ezhuthu.exe.\n\
              {assets}",
             quote(&self.hotkey),
+            quote(&self.convert_hotkey),
             quote(mode),
             self.beam,
             self.remember_picks,
@@ -163,6 +171,7 @@ mod tests {
     fn saved_settings_read_back_identically() {
         let c = Config {
             hotkey: "Ctrl+Shift+F5".into(),
+            convert_hotkey: String::new(),
             insert_mode: InsertMode::Clipboard,
             beam: 7,
             remember_picks: false,
