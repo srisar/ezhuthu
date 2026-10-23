@@ -252,7 +252,7 @@ Put these in `tests/words.tsv`, and use them both for the Python parity script a
 | 4 | `Ctrl+R` refine | Works with a key, degrades cleanly without one or offline |
 | 5 | Polish | See the backlog below |
 
-**Phase 5 backlog:** a "convert selection" hotkey (copy the selected romanized text, transliterate it, replace it); remembering the user's candidate picks (a small local user dictionary that boosts them next time); ~~an autostart toggle (HKCU `Run` registry key)~~ (done: tray menu "Start with Windows"); UI Automation caret position; a settings dialog; ~~an installer (a zip is fine to begin with)~~ (done: `tools/build-installer.sh` builds a per-user, no-admin `ezhuthu-setup.exe` written in Rust, which the user chose over Inno Setup and a zip; uninstall via Settings > Apps).
+**Phase 5 backlog:** a "convert selection" hotkey (copy the selected romanized text, transliterate it, replace it); remembering the user's candidate picks (a small local user dictionary that boosts them next time); ~~an autostart toggle (HKCU `Run` registry key)~~ (done: tray menu "Start with Windows"); UI Automation caret position; ~~a settings dialog~~ (done: tray menu Settings..., also opened by launching ezhuthu again); ~~an installer (a zip is fine to begin with)~~ (done: `tools/build-installer.sh` builds a per-user, no-admin `ezhuthu-setup.exe` written in Rust, which the user chose over Inno Setup and a zip; uninstall via Settings > Apps).
 
 ## 10. Repository layout
 

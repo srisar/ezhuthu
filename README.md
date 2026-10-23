@@ -13,7 +13,7 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 | 2: `xlit` crate and `xlit-cli` (`crates/xlit`) | done: tract, KV-cached decoder, exact top-5 parity with Python |
 | 3: tray app (`crates/app`) | done: tested in Notepad, Chrome, Word, VS Code; Windows search box not yet tried |
 | 4: refine (Ctrl+R) | deferred |
-| 5: polish | per-user installer and Start with Windows done |
+| 5: polish | per-user installer, Settings window, Start with Windows done |
 
 ## Install
 
@@ -21,7 +21,7 @@ Run `ezhuthu-setup-<version>.exe`. It installs for the current user only, with n
 - restricts the install folder so only you, SYSTEM and Administrators can change it. A drive without permissions (FAT32/exFAT) is refused;
 - adds a Start Menu shortcut;
 - adds an entry in **Settings > Apps**, whose uninstall runs `ezhuthu.exe --uninstall`;
-- sets **Start with Windows** if its checkbox is ticked (you can change it later from the tray menu);
+- sets **Start with Windows** if its checkbox is ticked (you can change it later in **Settings**);
 - starts the app.
 
 Running a newer setup updates an existing install in place, and settings in `%APPDATA%\ezhuthu` are kept. Uninstall deletes only ezhuthu's own files (a fixed list built into the program, after checking for links), so anything else in the folder is left alone. Unattended install: `ezhuthu-setup.exe --silent [--dir <folder>] [--autostart] [--no-launch]`. The setup isn't code-signed yet, so Windows SmartScreen may warn the first time. Choose **More info > Run anyway**.
@@ -56,7 +56,7 @@ cargo build --release -p ezhuthu
 
 When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start/search box.
 
-Settings are in `%APPDATA%\ezhuthu\config.toml`; use "Open settings file" in the tray menu. The app looks for model files in `assets/` next to the exe. Dev builds (`dev` and `fast` profiles) also look in the workspace `assets/`.
+Change settings from the tray menu: **Settings...** sets the Tamil-mode hotkey, how text is inserted (typing, or pasting for apps that garble typed Tamil), suggestions per word and Start with Windows. Launching ezhuthu again while it is running also opens Settings. They are saved in `%APPDATA%\ezhuthu\config.toml`. The app looks for model files in `assets/` next to the exe. Dev builds (`dev` and `fast` profiles) also look in the workspace `assets/`.
 
 ## Transliteration library and CLI (Rust)
 

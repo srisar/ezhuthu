@@ -42,6 +42,61 @@ impl Hotkey {
         }
         Ok(Self { modifiers, vk })
     }
+
+    /// From the Windows hotkey control's value (HKM_GETHOTKEY: low byte the
+    /// virtual key, high byte HOTKEYF_SHIFT=1 / CONTROL=2 / ALT=4 / EXT=8).
+    /// None if there is no modifier or the key has no name we can store.
+    pub fn from_control(value: u16) -> Option<Self> {
+        let (vk, flags) = ((value & 0xFF) as u32, (value >> 8) as u32);
+        let mut modifiers = 0;
+        for (flag, modifier) in [(1, MOD_SHIFT), (2, MOD_CONTROL), (4, MOD_ALT)] {
+            if flags & flag != 0 {
+                modifiers |= modifier;
+            }
+        }
+        (modifiers != 0 && key_name(vk).is_some()).then_some(Self { modifiers, vk })
+    }
+
+    /// Value for the hotkey control. None for Win combinations, which the
+    /// control can't show.
+    pub fn to_control(self) -> Option<u16> {
+        if self.modifiers & MOD_WIN != 0 {
+            return None;
+        }
+        let flags = (self.modifiers & MOD_SHIFT != 0) as u16
+            | ((self.modifiers & MOD_CONTROL != 0) as u16) << 1
+            | ((self.modifiers & MOD_ALT != 0) as u16) << 2;
+        Some(flags << 8 | self.vk as u16)
+    }
+}
+
+/// "Ctrl+Alt+T": the form stored in the settings file and shown to users.
+impl std::fmt::Display for Hotkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (bit, name) in [
+            (MOD_CONTROL, "Ctrl"),
+            (MOD_ALT, "Alt"),
+            (MOD_SHIFT, "Shift"),
+            (MOD_WIN, "Win"),
+        ] {
+            if self.modifiers & bit != 0 {
+                write!(f, "{name}+")?;
+            }
+        }
+        f.write_str(&key_name(self.vk).unwrap_or_else(|| format!("0x{:02X}", self.vk)))
+    }
+}
+
+/// The name `parse_key` accepts for a virtual key.
+fn key_name(vk: u32) -> Option<String> {
+    match vk {
+        0x30..=0x39 | 0x41..=0x5A => Some(char::from(vk as u8).to_string()),
+        0x20 => Some("Space".into()),
+        0x0D => Some("Enter".into()),
+        0x09 => Some("Tab".into()),
+        0x70..=0x87 => Some(format!("F{}", vk - 0x70 + 1)),
+        _ => None,
+    }
 }
 
 fn parse_key(key: &str) -> Option<u32> {
@@ -80,6 +135,27 @@ mod tests {
             }
         );
         assert_eq!(Hotkey::parse("Alt+F12").unwrap().vk, 0x7B);
+    }
+
+    #[test]
+    fn round_trips_through_text_and_the_hotkey_control() {
+        for s in ["Ctrl+Alt+T", "Ctrl+Shift+F5", "Alt+Space", "Ctrl+1"] {
+            let h = Hotkey::parse(s).unwrap();
+            assert_eq!(h.to_string(), s);
+            assert_eq!(Hotkey::from_control(h.to_control().unwrap()), Some(h));
+        }
+        // Ctrl+Alt+T as the control reports it: HOTKEYF_CONTROL | HOTKEYF_ALT, 'T'
+        assert_eq!(
+            Hotkey::parse("Ctrl+Alt+T").unwrap().to_control(),
+            Some(0x0654)
+        );
+        assert_eq!(Hotkey::parse("Win+Shift+T").unwrap().to_control(), None);
+        assert_eq!(Hotkey::from_control(b'T' as u16), None, "no modifier");
+        assert_eq!(
+            Hotkey::from_control(0x0200 | 0xBC),
+            None,
+            "comma has no stored name"
+        );
     }
 
     #[test]
