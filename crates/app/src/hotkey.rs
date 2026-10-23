@@ -42,6 +42,44 @@ impl Hotkey {
         }
         Ok(Self { modifiers, vk })
     }
+
+    /// A combination pressed in the Settings window's key box: `modifiers`
+    /// (MOD_* bits) held while `vk` went down. Needs Ctrl, Alt or Win (Shift
+    /// alone would turn ordinary capital letters into the toggle) and a key
+    /// we can store by name. Ctrl+Space and friends are fine.
+    pub fn from_keys(modifiers: u32, vk: u32) -> Option<Self> {
+        let strong = modifiers & (MOD_CONTROL | MOD_ALT | MOD_WIN) != 0;
+        (strong && key_name(vk).is_some()).then_some(Self { modifiers, vk })
+    }
+}
+
+/// "Ctrl+Alt+T": the form stored in the settings file and shown to users.
+impl std::fmt::Display for Hotkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (bit, name) in [
+            (MOD_CONTROL, "Ctrl"),
+            (MOD_ALT, "Alt"),
+            (MOD_SHIFT, "Shift"),
+            (MOD_WIN, "Win"),
+        ] {
+            if self.modifiers & bit != 0 {
+                write!(f, "{name}+")?;
+            }
+        }
+        f.write_str(&key_name(self.vk).unwrap_or_else(|| format!("0x{:02X}", self.vk)))
+    }
+}
+
+/// The name `parse_key` accepts for a virtual key.
+fn key_name(vk: u32) -> Option<String> {
+    match vk {
+        0x30..=0x39 | 0x41..=0x5A => Some(char::from(vk as u8).to_string()),
+        0x20 => Some("Space".into()),
+        0x0D => Some("Enter".into()),
+        0x09 => Some("Tab".into()),
+        0x70..=0x87 => Some(format!("F{}", vk - 0x70 + 1)),
+        _ => None,
+    }
 }
 
 fn parse_key(key: &str) -> Option<u32> {
@@ -80,6 +118,43 @@ mod tests {
             }
         );
         assert_eq!(Hotkey::parse("Alt+F12").unwrap().vk, 0x7B);
+    }
+
+    #[test]
+    fn round_trips_through_text() {
+        for s in [
+            "Ctrl+Alt+T",
+            "Ctrl+Space",
+            "Ctrl+Shift+F5",
+            "Alt+Space",
+            "Ctrl+1",
+            "Win+Enter",
+        ] {
+            assert_eq!(Hotkey::parse(s).unwrap().to_string(), s);
+        }
+    }
+
+    #[test]
+    fn captures_pressed_combinations() {
+        let ctrl_space = Hotkey::from_keys(MOD_CONTROL, 0x20).unwrap();
+        assert_eq!(ctrl_space.to_string(), "Ctrl+Space");
+        assert_eq!(
+            Hotkey::from_keys(MOD_ALT | MOD_SHIFT, 0x09)
+                .unwrap()
+                .to_string(),
+            "Alt+Shift+Tab"
+        );
+        assert_eq!(Hotkey::from_keys(0, b'T' as u32), None, "no modifier");
+        assert_eq!(
+            Hotkey::from_keys(MOD_SHIFT, b'T' as u32),
+            None,
+            "Shift alone types capitals"
+        );
+        assert_eq!(
+            Hotkey::from_keys(MOD_CONTROL, 0xBC),
+            None,
+            "comma has no stored name"
+        );
     }
 
     #[test]

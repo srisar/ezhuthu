@@ -15,15 +15,17 @@ mod focus;
 mod hotkey;
 mod insert;
 mod popup;
+mod settings;
 mod tray;
 mod win;
 
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::core::w;
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+use windows::core::{HSTRING, PCWSTR, w};
 
 fn main() {
     if std::env::args().skip(1).any(|a| a == "--uninstall") {
@@ -37,10 +39,21 @@ fn main() {
         // One instance per user session. The handle lives until exit.
         let _mutex = CreateMutexW(None, true, w!(r"Local\ezhuthu-single-instance"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            win::error_box(
-                None,
-                "ezhuthu is already running. Look for its icon in the tray.",
+            // Launched again (e.g. from the Start Menu): open the running
+            // copy's Settings instead of complaining.
+            let main = FindWindowW(
+                &HSTRING::from(ezhuthu_install::MAIN_WINDOW_CLASS),
+                PCWSTR::null(),
             );
+            match main {
+                Ok(h) => {
+                    let _ = PostMessageW(Some(h), app::WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
+                }
+                Err(_) => win::error_box(
+                    None,
+                    "ezhuthu is already running. Look for its icon in the tray.",
+                ),
+            }
             return;
         }
     }

@@ -36,18 +36,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN,
     VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_UP,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HHOOK,
-    HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MA_NOACTIVATE, MSG, PostMessageW,
-    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNORMAL,
+    HWND_TOPMOST, IsDialogMessageW, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MA_NOACTIVATE, MSG,
+    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE,
     SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
     UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
     WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEACTIVATE, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_USER, WNDCLASSEXW,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::w;
 
 use crate::caret;
 use crate::compose::Composer;
@@ -57,14 +56,17 @@ use crate::focus;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::insert::{self, Out};
 use crate::popup::{Popup, View};
+use crate::settings;
 use crate::tray::{self, Tray};
-use crate::win::{error_box, instance, wide};
+use crate::win::{error_box, instance};
 
 const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_ENGINE: u32 = WM_APP + 2;
 const WM_APP_TOGGLE: u32 = WM_APP + 3;
 const WM_APP_FLUSH: u32 = WM_APP + 4;
 const WM_APP_FOREGROUND: u32 = WM_APP + 5;
+/// Opens Settings; sent by a second launch of ezhuthu.exe (see main.rs).
+pub const WM_APP_SETTINGS: u32 = WM_APP + 6;
 const NIN_SELECT: u32 = WM_USER;
 const HOTKEY_ID: i32 = 1;
 const MAX_ROWS: usize = 9;
@@ -181,6 +183,10 @@ pub fn run() -> Result<()> {
     // SAFETY: standard message loop on the thread that owns our windows.
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            // Tab, Enter and Esc in the Settings window behave like a dialog.
+            if settings::hwnd().is_some_and(|h| IsDialogMessageW(h, &msg).as_bool()) {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -333,6 +339,18 @@ impl App {
         self.tray.set_state(self.on, &tip);
     }
 
+    /// Reloads the model with a new number of suggestions (beam size).
+    fn restart_engine(&mut self, beam: usize) {
+        self.discard();
+        // Dropping the old engine ends its thread once its queue is empty.
+        self.engine = Engine::start(self.config.assets_dir(), beam, self.main, WM_APP_ENGINE);
+        self.xlit = None;
+        self.status = Status::Loading;
+        self.cache.clear();
+        self.pending.clear();
+        self.popup.set_rows(beam.min(MAX_ROWS));
+    }
+
     fn candidates(&self) -> &[String] {
         self.composer
             .key()
@@ -466,6 +484,11 @@ impl App {
             return false;
         }
         if !self.on || is_modifier(ev.vk) {
+            return false;
+        }
+        // Keys for our own Settings window (e.g. a new hotkey) go straight to it.
+        // SAFETY: plain query.
+        if settings::hwnd().is_some_and(|h| unsafe { GetForegroundWindow() } == h) {
             return false;
         }
         let swallow = if ev.down {
@@ -705,22 +728,12 @@ fn on_tray(event: u32) {
     ) {
         return;
     }
-    let Some((main, on, header, path)) = with_app(|a| {
-        (
-            a.main,
-            a.on,
-            tooltip(&a.config, a.on),
-            a.config_path.clone(),
-        )
-    }) else {
+    let Some((main, on, header)) = with_app(|a| (a.main, a.on, tooltip(&a.config, a.on))) else {
         return;
     };
     const TOGGLE: usize = 1;
     const SETTINGS: usize = 2;
-    const RELOAD: usize = 3;
-    const QUIT: usize = 4;
-    const AUTOSTART: usize = 5;
-    let autostart = ezhuthu_install::autostart_enabled();
+    const QUIT: usize = 3;
     let toggle_label = if on {
         "Turn Tamil mode off"
     } else {
@@ -730,79 +743,92 @@ fn on_tray(event: u32) {
         (0, header.as_str()),
         (0, "-"),
         (TOGGLE, toggle_label),
-        (SETTINGS, "Open settings file"),
-        (RELOAD, "Reload settings"),
-        (AUTOSTART, "Start with Windows"),
+        (SETTINGS, "Settings..."),
         (0, "-"),
         (QUIT, "Quit"),
     ];
-    let checked: &[usize] = if autostart { &[AUTOSTART] } else { &[] };
     // Modal loop: the app state must not be borrowed meanwhile.
-    match tray::menu(main, &items, checked) {
+    match tray::menu(main, &items, &[]) {
         TOGGLE => toggle(),
-        SETTINGS => open_in_notepad(&path),
-        RELOAD => reload_settings(),
-        AUTOSTART => set_autostart(!autostart),
+        SETTINGS => open_settings(),
         QUIT => quit(),
         _ => {}
     }
 }
 
-fn set_autostart(on: bool) {
-    let exe = std::env::current_exe();
-    let result = match (&exe, on) {
-        (Ok(exe), true) => ezhuthu_install::set_autostart(Some(exe)),
-        (_, false) => ezhuthu_install::set_autostart(None),
-        (Err(e), true) => Err(anyhow::anyhow!("can't find ezhuthu.exe: {e}")),
-    };
-    if let Err(e) = result {
-        with_app(|a| {
-            a.tray.notify(
-                "Couldn't change Start with Windows",
-                &format!("{e:#}"),
-                true,
-            )
-        });
+/// Opens the Settings window. While it is open the global hotkey is
+/// unregistered (so pressing it records it in the hotkey box instead of
+/// toggling Tamil mode) and the keyboard hook ignores keys meant for it.
+fn open_settings() {
+    if settings::hwnd().is_some() {
+        settings::open(current_values(), apply_settings, settings_closed);
+        return;
     }
-}
-
-fn open_in_notepad(path: &std::path::Path) {
-    let file = wide(&format!("\"{}\"", path.display()));
-    // SAFETY: NUL-terminated strings that outlive the call.
-    unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            w!("notepad.exe"),
-            PCWSTR(file.as_ptr()),
-            None,
-            SW_SHOWNORMAL,
-        );
-    }
-}
-
-fn reload_settings() {
     with_app(|a| {
-        let new = match Config::load_or_create(&a.config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                a.tray
-                    .notify("Settings not reloaded", &format!("{e:#}"), true);
-                return;
+        // SAFETY: our registration; re-registered in `settings_closed`.
+        let _ = unsafe { UnregisterHotKey(Some(a.main), HOTKEY_ID) };
+        a.discard();
+    });
+    settings::open(current_values(), apply_settings, settings_closed);
+}
+
+fn current_values() -> settings::Values {
+    let autostart = ezhuthu_install::autostart_enabled();
+    with_app(|a| settings::Values {
+        hotkey: a.config.hotkey.clone(),
+        insert_mode: a.config.insert_mode,
+        beam: a.config.beam,
+        autostart,
+    })
+    .unwrap_or(settings::Values {
+        hotkey: Config::default().hotkey,
+        insert_mode: InsertMode::Unicode,
+        beam: ezhuthu_xlit::DEFAULT_BEAM,
+        autostart,
+    })
+}
+
+fn settings_closed() {
+    with_app(|a| a.register_hotkey());
+}
+
+/// Settings window OK: validate, apply live and save.
+fn apply_settings(v: &settings::Values) -> Result<(), String> {
+    let hotkey = Hotkey::parse(&v.hotkey).map_err(|e| format!("{e:#}"))?;
+    let result = with_app(|a| {
+        if v.hotkey != a.config.hotkey {
+            // The current hotkey is unregistered while Settings is open, so a
+            // trial registration tells whether another app holds the new one.
+            let mods = HOT_KEY_MODIFIERS(hotkey.modifiers) | MOD_NOREPEAT;
+            // SAFETY: a trial registration, removed straight away.
+            let free = unsafe { RegisterHotKey(Some(a.main), HOTKEY_ID, mods, hotkey.vk) }.is_ok();
+            let _ = unsafe { UnregisterHotKey(Some(a.main), HOTKEY_ID) };
+            if !free {
+                return Err(format!(
+                    "{} is already used by another app. Choose another.",
+                    v.hotkey
+                ));
             }
-        };
-        let restart = new.assets_dir != a.config.assets_dir || new.beam != a.config.beam;
+        }
+        let exe = std::env::current_exe().map_err(|e| format!("can't find ezhuthu.exe: {e}"))?;
+        ezhuthu_install::set_autostart(v.autostart.then_some(exe.as_path()))
+            .map_err(|e| format!("Couldn't change Start with Windows: {e:#}"))?;
+
+        let mut new = a.config.clone();
+        new.hotkey = v.hotkey.clone();
+        new.insert_mode = v.insert_mode;
+        new.beam = v.beam;
+        new.save(&a.config_path)
+            .map_err(|e| format!("Couldn't save the settings: {e:#}"))?;
+        if new.beam != a.config.beam {
+            a.restart_engine(new.beam);
+        }
         a.config = new;
-        a.register_hotkey();
         let tip = tooltip(&a.config, a.on);
         a.tray.set_state(a.on, &tip);
-        let note = if restart {
-            "Restart ezhuthu to apply the model settings (beam, assets_dir)."
-        } else {
-            "New settings are active."
-        };
-        a.tray.notify("Settings reloaded", note, false);
+        Ok(())
     });
+    result.unwrap_or_else(|| Err("ezhuthu is busy; try again".into()))
 }
 
 fn quit() {
@@ -835,6 +861,7 @@ unsafe extern "system" fn main_proc(
         WM_APP_ENGINE => on_engine_events(),
         // The installer asks a running copy to quit this way.
         WM_CLOSE => quit(),
+        WM_APP_SETTINGS => open_settings(),
         WM_APP_FOREGROUND => {
             with_app(|a| a.discard());
         }

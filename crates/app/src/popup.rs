@@ -172,6 +172,10 @@ impl Popup {
         }
     }
 
+    pub fn set_rows(&mut self, rows: usize) {
+        self.rows = rows;
+    }
+
     pub fn rows(&self) -> usize {
         self.rows
     }
