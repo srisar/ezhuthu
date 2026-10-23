@@ -47,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
-use crate::config::{Config, InsertMode};
+use crate::config::{Config, InsertMode, Theme};
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::win::instance;
 
@@ -61,6 +61,7 @@ const ID_REMEMBER: i32 = 16;
 const ID_FORGET: i32 = 17;
 const ID_CONVERT_ON: i32 = 18;
 const ID_CONVERT_KEY: i32 = 19;
+const ID_THEME: i32 = 30;
 /// Radio buttons for the presets, then "Custom".
 const ID_PRESET: i32 = 20;
 const ID_CUSTOM: i32 = ID_PRESET + PRESETS.len() as i32;
@@ -69,6 +70,12 @@ const ID_MUTED: i32 = 40;
 /// The red heart in the "Built by" line.
 const ID_HEART: i32 = 41;
 
+/// Popup theme choices, in the dropdown's order.
+const THEMES: [(Theme, &str); 3] = [
+    (Theme::System, "Match Windows"),
+    (Theme::Light, "Light"),
+    (Theme::Dark, "Dark"),
+];
 /// Suggestions per word offered in the dropdown.
 const BEAM_CHOICES: std::ops::RangeInclusive<usize> = 3..=9;
 /// Shortcut presets and an optional note shown beside each.
@@ -89,6 +96,7 @@ pub struct Values {
     pub insert_mode: InsertMode,
     pub beam: usize,
     pub remember_picks: bool,
+    pub theme: Theme,
     pub autostart: bool,
 }
 
@@ -386,14 +394,33 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             (RIGHT - 160, 178, 160, 26),
         )?);
 
-        general.extend(section("Startup", 216)?);
+        general.extend(section("Appearance", 216)?);
+        general.push(child(
+            w!("STATIC"),
+            "Popup theme",
+            0,
+            none,
+            -1,
+            (X, 242, 200, 20),
+        )?);
+        let theme = child(
+            w!("COMBOBOX"),
+            "",
+            tab | WS_GROUP.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32,
+            none,
+            ID_THEME,
+            (RIGHT - 160, 238, 160, 200),
+        )?;
+        general.push(theme);
+
+        general.extend(section("Startup", 280)?);
         general.push(child(
             w!("BUTTON"),
             "Start Ezhuthu when I sign in to Windows",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_AUTOSTART,
-            (X, 240, 420, 22),
+            (X, 304, 420, 22),
         )?);
 
         // -------------------------------------------------------------- Shortcuts
@@ -628,6 +655,21 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             - BEAM_CHOICES.start();
         SendMessageW(beam, CB_SETCURSEL, Some(WPARAM(beam_index)), None);
         let check = |on: bool| if on { BST_CHECKED } else { BST_UNCHECKED };
+        for (_, label) in THEMES {
+            SendMessageW(
+                theme,
+                CB_ADDSTRING,
+                None,
+                Some(LPARAM(HSTRING::from(label).as_ptr() as isize)),
+            );
+        }
+        let theme_index = THEMES.iter().position(|(t, _)| *t == values.theme);
+        SendMessageW(
+            theme,
+            CB_SETCURSEL,
+            Some(WPARAM(theme_index.unwrap_or(0))),
+            None,
+        );
         let _ = CheckDlgButton(hwnd, ID_REMEMBER, check(values.remember_picks));
         let _ = CheckDlgButton(hwnd, ID_AUTOSTART, check(values.autostart));
         let _ = CheckDlgButton(hwnd, ID_CONVERT_ON, check(convert_on));
@@ -679,6 +721,15 @@ fn info(hwnd: HWND, text: &str) {
     }
 }
 
+/// The selected item of a dropdown (0 if none).
+fn selection(hwnd: HWND, id: i32) -> usize {
+    // SAFETY: reading our own control.
+    unsafe {
+        let combo = GetDlgItem(Some(hwnd), id).unwrap_or_default();
+        SendMessageW(combo, CB_GETCURSEL, None, None).0.max(0) as usize
+    }
+}
+
 fn checked(hwnd: HWND, id: i32) -> bool {
     // SAFETY: reading our own control.
     unsafe { IsDlgButtonChecked(hwnd, id) == BST_CHECKED.0 }
@@ -707,18 +758,14 @@ fn read(hwnd: HWND, custom: String, convert: String) -> Result<Values, String> {
     } else {
         InsertMode::Unicode
     };
-    // SAFETY: reading our own control.
-    let index = unsafe {
-        let beam = GetDlgItem(Some(hwnd), ID_BEAM).unwrap_or_default();
-        SendMessageW(beam, CB_GETCURSEL, None, None).0.max(0) as usize
-    };
-    let beam = (BEAM_CHOICES.start() + index).min(*BEAM_CHOICES.end());
+    let beam = (BEAM_CHOICES.start() + selection(hwnd, ID_BEAM)).min(*BEAM_CHOICES.end());
     Ok(Values {
         hotkey,
         convert_hotkey,
         insert_mode,
         beam,
         remember_picks: checked(hwnd, ID_REMEMBER),
+        theme: THEMES[selection(hwnd, ID_THEME).min(THEMES.len() - 1)].0,
         autostart: checked(hwnd, ID_AUTOSTART),
     })
 }
@@ -1032,6 +1079,7 @@ mod tests {
             insert_mode: InsertMode::Unicode,
             beam: 5,
             remember_picks: true,
+            theme: Theme::System,
             autostart: true,
         };
         fn forget() -> Result<(), String> {

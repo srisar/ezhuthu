@@ -847,6 +847,8 @@ impl App {
         self.shown_key = None;
         self.request();
         self.note_shown();
+        // Read each time, so a change to Windows' light/dark mode shows at once.
+        self.popup.set_dark(self.config.theme.is_dark());
         self.popup.set_dpi(caret::dpi_at(anchor));
         let (w, h) = self.popup.size();
         let (x, y) = caret::place(anchor, w, h, self.popup.gap());
@@ -1259,6 +1261,7 @@ fn current_values() -> settings::Values {
         insert_mode: config.insert_mode,
         beam: config.beam,
         remember_picks: config.remember_picks,
+        theme: config.theme,
         autostart,
     }
 }
@@ -1324,6 +1327,7 @@ fn apply_settings(v: &settings::Values) -> Result<(), String> {
         new.insert_mode = v.insert_mode;
         new.beam = v.beam;
         new.remember_picks = v.remember_picks;
+        new.theme = v.theme;
         new.save(&a.config_path)
             .map_err(|e| format!("Couldn't save the settings: {e:#}"))?;
         if new.beam != a.config.beam {

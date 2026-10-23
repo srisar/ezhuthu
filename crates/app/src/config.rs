@@ -14,6 +14,36 @@ pub enum InsertMode {
     Clipboard,
 }
 
+/// The popup's colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Follow Windows' app mode (Settings > Personalisation > Colours).
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+
+    /// Whether to draw dark, reading Windows' setting for `System`.
+    pub fn is_dark(self) -> bool {
+        match self {
+            Theme::System => crate::win::apps_use_dark_theme(),
+            Theme::Light => false,
+            Theme::Dark => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -24,6 +54,7 @@ pub struct Config {
     pub beam: usize,
     /// Learn the suggestions the user picks (see `learned`).
     pub remember_picks: bool,
+    pub theme: Theme,
     pub assets_dir: Option<PathBuf>,
 }
 
@@ -35,6 +66,7 @@ impl Default for Config {
             insert_mode: InsertMode::Unicode,
             beam: ezhuthu_xlit::DEFAULT_BEAM,
             remember_picks: true,
+            theme: Theme::System,
             assets_dir: None,
         }
     }
@@ -100,6 +132,10 @@ impl Config {
              # (kept in learned.tsv next to this file).\n\
              remember_picks = {}\n\
              \n\
+             # Popup colours: \"system\" follows Windows' light/dark mode; or\n\
+             # \"light\" or \"dark\".\n\
+             theme = {}\n\
+             \n\
              # Folder with the model files. Default: \"assets\" next to ezhuthu.exe.\n\
              {assets}",
             quote(&self.hotkey),
@@ -107,6 +143,7 @@ impl Config {
             quote(mode),
             self.beam,
             self.remember_picks,
+            quote(self.theme.as_str()),
         )
     }
 
@@ -175,6 +212,7 @@ mod tests {
             insert_mode: InsertMode::Clipboard,
             beam: 7,
             remember_picks: false,
+            theme: Theme::Dark,
             assets_dir: Some(PathBuf::from(r#"D:\it's "odd"\assets"#)),
         };
         assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
