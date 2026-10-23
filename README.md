@@ -17,7 +17,7 @@ The design, constraints and phase plan are in [HANDOFF.md](HANDOFF.md).
 
 ## Install
 
-Run `ezhuthu-setup-<version>.exe`. It installs for the current user only, with no administrator rights. The setup window shows the install folder, by default `%LOCALAPPDATA%\Programs\ezhuthu`. Use **Browse…** to pick another location (an `ezhuthu` folder is created there) or type a path. Setup then:
+Download `ezhuthu-setup-<version>.exe` from the [latest release](https://github.com/srisar/ezhuthu/releases/latest) and run it. It installs for the current user only, with no administrator rights. The setup window shows the install folder, by default `%LOCALAPPDATA%\Programs\ezhuthu`. Use **Browse…** to pick another location (an `ezhuthu` folder is created there) or type a path. Setup then:
 - restricts the install folder so only you, SYSTEM and Administrators can change it. A drive without permissions (FAT32/exFAT) is refused;
 - adds a Start Menu shortcut;
 - adds an entry in **Settings > Apps**, whose uninstall runs `ezhuthu.exe --uninstall`;
@@ -33,6 +33,8 @@ tools/build-installer.sh   # -> dist/ezhuthu-setup-<version>.exe
 ```
 
 It is a single self-contained file: the release `ezhuthu.exe` plus the model assets.
+
+To publish a release, bump `version` in `Cargo.toml`, merge to main, then run `tools/release.sh` from an up-to-date main. It checks formatting, lints and tests, builds the installer, tags `v<version>` and creates the GitHub release with the installer and its SHA-256. Use `--dry-run` to build without publishing, or `--draft` to review the release on GitHub before publishing.
 
 ## The app
 
