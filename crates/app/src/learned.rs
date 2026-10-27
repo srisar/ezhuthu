@@ -51,6 +51,11 @@ impl Learned {
         self.words.len()
     }
 
+    /// The remembered word for `key`, if any.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.words.get(key).map(String::as_str)
+    }
+
     /// Moves the remembered word for `key` to the front of `candidates`
     /// (adding it if the model no longer offers it).
     pub fn apply(&self, key: &str, candidates: &mut Vec<String>) {
@@ -155,6 +160,8 @@ mod tests {
         let mut c = list(&["தமிழ்", "தாமில்", "தமில்"]);
         l.apply("thamil", &mut c);
         assert_eq!(c, list(&["தமில்", "தமிழ்", "தாமில்"]));
+        assert_eq!(l.get("thamil"), Some("தமில்"));
+        assert_eq!(l.get("amma"), None);
         // other words are untouched
         let mut other = list(&["அம்மா", "ஆம்மா"]);
         l.apply("amma", &mut other);

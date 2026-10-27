@@ -238,6 +238,29 @@ impl Canvas {
         });
     }
 
+    /// A four-pointed star (a sparkle) of radius `r` at (cx, cy), with
+    /// curved sides; smoothed by sampling each pixel 4 x 4.
+    pub fn star(&mut self, cx: f32, cy: f32, r: f32, color: Rgb, alpha: f32) {
+        self.paint(
+            (cx - r - 1.0, cy - r - 1.0, cx + r + 1.0, cy + r + 1.0),
+            color,
+            alpha,
+            |px, py| {
+                let mut hits = 0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let x = ((px - 0.5 + (sx as f32 + 0.5) / 4.0 - cx) / r).abs();
+                        let y = ((py - 0.5 + (sy as f32 + 0.5) / 4.0 - cy) / r).abs();
+                        if x.powf(0.6) + y.powf(0.6) <= 1.0 {
+                            hits += 1;
+                        }
+                    }
+                }
+                hits as f32 / 16.0
+            },
+        );
+    }
+
     /// A line from `a` to `b` with round ends.
     pub fn line(&mut self, a: (f32, f32), b: (f32, f32), width: f32, color: Rgb, alpha: f32) {
         let m = width;

@@ -88,7 +88,7 @@ Ezhuthu lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray i
 
 The last row is always the word exactly as you typed it, marked **EN**: press its number, or ↓ to it and Space.
 
-Ezhuthu remembers your choices. When you insert a suggestion other than the first, it comes first the next time you type that word. Pick the original first suggestion again to undo this. Only the words you picked are kept, in `%APPDATA%\ezhuthu\learned.tsv` on your PC. See, change, add or remove them on the **Words** tab in Settings, or turn learning off on General.
+Ezhuthu remembers your choices. When you insert a suggestion other than the first, it comes first the next time you type that word, marked with a sparkle ✨. Pick the original first suggestion again to undo this. Only the words you picked are kept, in `%APPDATA%\ezhuthu\learned.tsv` on your PC. See, change, add or remove them on the **Words** tab in Settings, or turn learning off on General.
 
 When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start menu search box.
 

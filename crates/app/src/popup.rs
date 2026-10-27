@@ -40,6 +40,8 @@ pub struct View {
     pub candidates: Vec<String>,
     /// The row holding the word as typed (inserted as English), if shown.
     pub english: Option<usize>,
+    /// The row holding a learned pick (marked with a sparkle), if any.
+    pub learned: Option<usize>,
     pub selected: usize,
     /// A status line (loading, errors); empty shows the key tips instead.
     pub hint: String,
@@ -475,6 +477,12 @@ impl Popup {
                 };
                 cv.text(f.small, "EN", chip, p.key_text, DT_CENTER | one_line);
             }
+            if view.learned == Some(i) {
+                // A sparkle: a big four-pointed star and a small one above it.
+                let (cx, cy) = (rx + rw - s(18), ry + rh / 2.0 + s(1));
+                cv.star(cx, cy, s(6), ORANGE, 1.0);
+                cv.star(cx + s(7), cy - s(6), s(3), ORANGE, 1.0);
+            }
         }
 
         // Key tips, or a status line.
@@ -571,6 +579,7 @@ mod tests {
             preview: preview.into(),
             candidates: candidates.iter().map(|s| s.to_string()).collect(),
             english: candidates.len().checked_sub(1),
+            learned: None,
             selected: 0,
             hint: String::new(),
             warn: false,
@@ -588,11 +597,12 @@ mod tests {
         };
         let mut popup = Popup::create(Some(proc), 6).unwrap();
         popup.set_dpi(144);
-        let v = view(
+        let mut v = view(
             "vanakkam",
             "வணக்கம்",
             &["வணக்கம்", "வனக்கம்", "வணக்காம்", "வானக்கம்", "வனாக்கம்", "vanakkam"],
         );
+        v.learned = Some(0);
         let (w, h) = popup.size();
         for (dark, name) in [(false, "light"), (true, "dark")] {
             popup.set_dark(dark);
@@ -660,6 +670,9 @@ mod tests {
             popup.set_dpi(dpi);
             popup.paint(dc, &view("", "", &[]));
             popup.paint(dc, &view("amma", "அம்மா", &["அம்மா", "ஆம்மா", "amma"]));
+            let mut learned = view("amma", "அம்மா", &["அம்மா", "ஆம்மா", "amma"]);
+            learned.learned = Some(0);
+            popup.paint(dc, &learned);
             let mut status = view("amma", "", &[]);
             status.hint = "Loading the model…".into();
             popup.paint(dc, &status);
