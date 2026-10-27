@@ -36,6 +36,9 @@ pub fn split_word(word: &str) -> Parts<'_> {
 #[derive(Debug, Default)]
 pub struct Composer {
     text: String,
+    /// Where letters go, in characters from the start (edit mid-word with
+    /// the arrow keys).
+    cursor: usize,
     selected: usize,
 }
 
@@ -52,14 +55,56 @@ impl Composer {
         self.text.is_empty()
     }
 
+    /// Inserts `c` at the cursor.
     pub fn push(&mut self, c: char) {
-        self.edit(|t| t.push(c));
+        let at = self.byte_at(self.cursor);
+        self.edit(|t| t.insert(at, c));
+        self.cursor += 1;
     }
 
+    /// Backspace: removes the character before the cursor.
     pub fn pop(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor -= 1;
+        let at = self.byte_at(self.cursor);
         self.edit(|t| {
-            t.pop();
+            t.remove(at);
         });
+    }
+
+    /// Delete: removes the character after the cursor.
+    pub fn delete(&mut self) {
+        if self.cursor < self.text.chars().count() {
+            let at = self.byte_at(self.cursor);
+            self.edit(|t| {
+                t.remove(at);
+            });
+        }
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Moves the cursor by `delta` characters, staying within the word.
+    pub fn move_cursor(&mut self, delta: isize) {
+        let len = self.text.chars().count() as isize;
+        self.cursor = (self.cursor as isize + delta).clamp(0, len) as usize;
+    }
+
+    /// Home (false) or End (true).
+    pub fn cursor_to(&mut self, end: bool) {
+        self.cursor = if end { self.text.chars().count() } else { 0 };
+    }
+
+    /// The byte offset of character `chars`.
+    fn byte_at(&self, chars: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(chars)
+            .map_or(self.text.len(), |(i, _)| i)
     }
 
     /// Applies an edit; the selection resets when the transliterated part changes.
@@ -181,6 +226,29 @@ mod tests {
         assert_eq!(c.selected(), 4);
         c.move_selection(1, 5);
         assert_eq!(c.selected(), 0);
+    }
+
+    #[test]
+    fn edits_mid_word_at_the_cursor() {
+        let mut c = typed("vanakam");
+        assert_eq!(c.cursor(), 7);
+        c.move_cursor(-2);
+        c.push('k');
+        assert_eq!(c.text(), "vanakkam");
+        assert_eq!(c.cursor(), 6);
+        c.cursor_to(false);
+        c.delete();
+        assert_eq!(c.text(), "anakkam");
+        c.pop();
+        assert_eq!(c.text(), "anakkam", "backspace at the start does nothing");
+        c.push('v');
+        c.cursor_to(true);
+        c.pop();
+        assert_eq!(c.text(), "vanakka");
+        c.move_cursor(10);
+        assert_eq!(c.cursor(), 7, "the cursor stays within the word");
+        c.delete();
+        assert_eq!(c.text(), "vanakka", "delete at the end does nothing");
     }
 
     #[test]

@@ -80,9 +80,11 @@ Ezhuthu lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray i
 | Enter | insert the chosen word without a space |
 | 1–9 (0 for a tenth row) | insert that suggestion and a space |
 | ↑ / ↓ | choose a suggestion |
+| ← / →, Home / End | move within the word to fix a letter (Ctrl+← / → jump to its start or end) |
+| Delete | delete the letter after the cursor |
 | Backspace / Ctrl+Backspace | delete a letter / drop the word |
 | Esc | drop the word |
-| any other key (Tab, arrows, Ctrl+S…) | insert the word, then the key does its usual job |
+| any other key (Tab, Page Up, Ctrl+S…) | insert the word, then the key does its usual job |
 
 The last row is always the word exactly as you typed it, marked **English**: press its number, or ↓ to it and Space.
 

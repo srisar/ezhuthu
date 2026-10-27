@@ -34,6 +34,8 @@ use crate::win::{instance, scale, wide};
 /// What to draw, built from the app state on each paint.
 pub struct View {
     pub input: String,
+    /// The caret's place in `input`, in characters.
+    pub cursor: usize,
     pub preview: String,
     pub candidates: Vec<String>,
     /// The row holding the word as typed (inserted as English), if shown.
@@ -404,7 +406,16 @@ impl Popup {
             );
         } else {
             let end = text_tail(&mut cv, f.input, &view.input, text_box, p.text);
-            let caret_x = (end + scale(1, self.dpi)) as f32;
+            // The caret sits after the first `cursor` characters: measured
+            // from the left when the text fits, else from its right end.
+            let before: String = view.input.chars().take(view.cursor).collect();
+            let after: String = view.input.chars().skip(view.cursor).collect();
+            let caret = if end < text_box.right {
+                text_box.left + cv.measure(f.input, &before).0
+            } else {
+                end - cv.measure(f.input, &after).0
+            };
+            let caret_x = (caret + scale(1, self.dpi)) as f32;
             let (cy, ch) = (y + bh / 2.0, f.input_h as f32 * 0.42);
             cv.line(
                 (caret_x, cy - ch),
@@ -556,6 +567,7 @@ mod tests {
     fn view(input: &str, preview: &str, candidates: &[&str]) -> View {
         View {
             input: input.into(),
+            cursor: input.chars().count(),
             preview: preview.into(),
             candidates: candidates.iter().map(|s| s.to_string()).collect(),
             english: candidates.len().checked_sub(1),
