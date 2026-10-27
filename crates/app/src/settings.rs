@@ -2240,6 +2240,7 @@ mod tests {
             // SAFETY: ends the test's message loop.
             unsafe { PostQuitMessage(0) };
         }
+        let days_ago = |n: u64| history::now() - n * 86_400;
         let values = Values {
             hotkey: "Ctrl+Alt+T".into(),
             convert_hotkey: "Ctrl+Alt+Shift+T".into(),
@@ -2255,9 +2256,16 @@ mod tests {
                 ("thamil".into(), "தமில்".into()),
             ],
             history: vec![
-                entry("vanakkam", "வணக்கம்", 42, history::now()),
-                entry("endru", "என்று", 31, history::now() - 86_400),
-                entry("nandri", "நன்றி", 9, 1_700_000_000),
+                entry("vanakkam", "வணக்கம்", 42, days_ago(0)),
+                entry("endru", "என்று", 31, days_ago(0)),
+                entry("naan", "நான்", 27, days_ago(1)),
+                entry("romba", "ரொம்ப", 18, days_ago(1)),
+                entry("nandri", "நன்றி", 12, days_ago(3)),
+                entry("amma", "அம்மா", 9, days_ago(5)),
+                entry("veedu", "வீடு", 7, days_ago(8)),
+                entry("thamil", "தமிழ்", 6, days_ago(12)),
+                entry("paadal", "பாடல்", 4, days_ago(20)),
+                entry("kaalai", "காலை", 3, days_ago(41)),
             ],
             forget: Vec::new(),
         };
