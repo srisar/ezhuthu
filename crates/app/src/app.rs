@@ -100,8 +100,6 @@ const MAX_CACHE: usize = 2000;
 /// silently dropped them), so real keys are never held back for good.
 const IN_FLIGHT_TIMEOUT: Duration = Duration::from_millis(500);
 
-const HINT: &str = "↑↓ or 1–5 choose · Space / Enter insert · Esc discard";
-
 enum Status {
     Loading,
     Ready,
@@ -1138,13 +1136,8 @@ impl App {
             match &self.status {
                 Status::Loading => ("Loading the model…".to_string(), false),
                 Status::Failed(e) => (format!("Model failed to load: {e}"), true),
-                Status::Ready => {
-                    let keys = match self.rows() {
-                        n @ ..=9 => format!("1–{n}"),
-                        _ => "1–9, 0".to_string(),
-                    };
-                    (HINT.replace("1–5", &keys), false)
-                }
+                // Empty: the popup shows its key tips.
+                Status::Ready => (String::new(), false),
             }
         };
         View {
