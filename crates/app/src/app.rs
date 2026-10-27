@@ -34,7 +34,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, GetKeyboardLayout, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
     RegisterHotKey, ToUnicodeEx, UnregisterHotKey, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN,
     VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN,
-    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_UP,
+    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -87,6 +87,9 @@ const BADGE_TICK_MS: u32 = 16;
 /// nothing reaches the clipboard, after this long.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
 const COPY_TIMEOUT: Duration = Duration::from_millis(1500);
+/// After Print Screen mid-word, the first window to take the focus within
+/// this long is taken to be the screen capture tool (see `Capture`).
+const CAPTURE_GRACE: Duration = Duration::from_secs(3);
 const NIN_SELECT: u32 = WM_USER;
 const HOTKEY_ID: i32 = 1;
 /// Tamil candidates shown at most (the popup adds a row for English).
@@ -141,7 +144,25 @@ struct App {
     flash: Option<String>,
     convert_hotkey: Option<Hotkey>,
     converting: Option<Converting>,
+    capture: Option<Capture>,
     badge: Badge,
+}
+
+/// Print Screen was pressed mid-word: the word and popup stay while a screen
+/// capture tool (e.g. the Snipping Tool overlay) has the focus, so they show
+/// in the screenshot, and typing resumes when the focus returns to `target`.
+struct Capture {
+    target: HWND,
+    since: Instant,
+    /// The process of the first window that took the focus afterwards.
+    tool: Option<u32>,
+}
+
+fn process_of(hwnd: HWND) -> u32 {
+    let mut pid = 0;
+    // SAFETY: plain query.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    pid
 }
 
 /// A convert selection in progress, in `target` (the window it started in;
@@ -243,6 +264,7 @@ pub fn run() -> Result<()> {
         flash: None,
         convert_hotkey: None,
         converting: None,
+        capture: None,
         badge,
     };
     if let Some(e) = config_error {
@@ -888,8 +910,31 @@ impl App {
         }
     }
 
+    /// Another window came to the front: drop the word, unless it is the
+    /// screen capture tool after Print Screen (see `Capture`) or the focus
+    /// is back where the word is being typed.
+    fn on_foreground(&mut self, fg: HWND) {
+        if let Some(capture) = &mut self.capture {
+            if fg == capture.target {
+                self.capture = None;
+                return;
+            }
+            let pid = process_of(fg);
+            match capture.tool {
+                None if capture.since.elapsed() < CAPTURE_GRACE => {
+                    capture.tool = Some(pid);
+                    return;
+                }
+                Some(tool) if tool == pid => return,
+                _ => {}
+            }
+        }
+        self.discard();
+    }
+
     fn discard(&mut self) {
         self.composer.clear();
+        self.capture = None;
         self.shown_key = None;
         self.flash = None;
         self.hide_popup();
@@ -951,6 +996,22 @@ impl App {
         // SAFETY: plain query.
         let fg = unsafe { GetForegroundWindow() };
         if settings::hwnd() == Some(fg) || welcome::hwnd() == Some(fg) {
+            return false;
+        }
+        // Print Screen mid-word: let the screenshot be taken with the popup
+        // still showing, rather than inserting the word first.
+        if ev.vk == VK_SNAPSHOT.0 {
+            if !self.composer.is_empty() && self.capture.is_none() {
+                self.capture = Some(Capture {
+                    target: fg,
+                    since: Instant::now(),
+                    tool: None,
+                });
+            }
+            return false;
+        }
+        // Keys for the screen capture tool (Esc to cancel, …) aren't typing.
+        if self.capture.as_ref().is_some_and(|c| c.target != fg) {
             return false;
         }
         let swallow = if ev.down {
@@ -1440,7 +1501,8 @@ unsafe extern "system" fn main_proc(
             with_app(|a| a.save_learned());
         }
         WM_APP_FOREGROUND => {
-            with_app(|a| a.discard());
+            let fg = HWND(wparam.0 as *mut _);
+            with_app(|a| a.on_foreground(fg));
         }
         WM_DESTROY => {
             // SAFETY: ends our message loop.
@@ -1558,7 +1620,8 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// Another window came to the foreground (click, Alt+Tab): drop the word.
+/// Another window came to the foreground (click, Alt+Tab): usually drops the
+/// word (see `App::on_foreground`).
 unsafe extern "system" fn foreground_changed(
     _hook: HWINEVENTHOOK,
     _event: u32,
@@ -1570,7 +1633,15 @@ unsafe extern "system" fn foreground_changed(
 ) {
     let main = with_app(|a| (!a.composer.is_empty() && hwnd != a.popup.hwnd).then_some(a.main));
     if let Some(Some(main)) = main {
-        post(main, WM_APP_FOREGROUND);
+        // SAFETY: posting to our own window; the handle travels as a value.
+        let _ = unsafe {
+            PostMessageW(
+                Some(main),
+                WM_APP_FOREGROUND,
+                WPARAM(hwnd.0 as usize),
+                LPARAM(0),
+            )
+        };
     }
 }
 
