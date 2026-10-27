@@ -29,7 +29,17 @@ pub struct History {
     words: HashMap<(String, String), Use>,
 }
 
-fn now() -> u64 {
+/// A word in the history, as listed in Settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    pub key: String,
+    pub word: String,
+    pub count: u32,
+    /// Unix seconds.
+    pub last: u64,
+}
+
+pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -116,8 +126,31 @@ impl History {
             .map(|((key, word), _)| (key.as_str(), word.as_str()))
     }
 
-    pub fn clear(&mut self) {
-        self.words.clear();
+    /// Every word, most used first, then most recent.
+    pub fn entries(&self) -> Vec<Entry> {
+        let mut list: Vec<Entry> = self
+            .words
+            .iter()
+            .map(|((key, word), used)| Entry {
+                key: key.clone(),
+                word: word.clone(),
+                count: used.count,
+                last: used.last,
+            })
+            .collect();
+        list.sort_by(|a, b| {
+            (b.count, b.last, &a.key, &a.word).cmp(&(a.count, a.last, &b.key, &b.word))
+        });
+        list
+    }
+
+    /// Forgets these (key, word) pairs; true if any were kept.
+    pub fn forget(&mut self, words: &[(String, String)]) -> bool {
+        let before = self.words.len();
+        for pair in words {
+            self.words.remove(pair);
+        }
+        self.words.len() != before
     }
 
     fn to_tsv(&self) -> String {
@@ -166,6 +199,30 @@ mod tests {
         // only words that go on past the letters typed
         assert_eq!(h.complete("amma"), None);
         assert_eq!(h.complete("xyz"), None);
+    }
+
+    #[test]
+    fn lists_most_used_first_and_forgets_words() {
+        let mut h = History::default();
+        h.record_at("amma", "அம்மா", 10);
+        h.record_at("natpu", "நட்பு", 20);
+        h.record_at("natpu", "நட்பு", 30);
+        h.record_at("kadal", "கடல்", 40);
+        let keys = |h: &History| h.entries().into_iter().map(|e| e.key).collect::<Vec<_>>();
+        assert_eq!(keys(&h), ["natpu", "kadal", "amma"]);
+        assert_eq!(
+            h.entries()[0],
+            Entry {
+                key: "natpu".into(),
+                word: "நட்பு".into(),
+                count: 2,
+                last: 30
+            }
+        );
+        let gone = |k: &str, w: &str| (k.to_string(), w.to_string());
+        assert!(h.forget(&[gone("natpu", "நட்பு"), gone("nope", "இல்லை")]));
+        assert_eq!(keys(&h), ["kadal", "amma"]);
+        assert!(!h.forget(&[gone("natpu", "நட்பு")]));
     }
 
     #[test]

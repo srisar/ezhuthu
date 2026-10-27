@@ -1,10 +1,15 @@
-//! The Settings window (tray menu > Settings...), in four tabs:
-//! - General: typing (suggestions per word, insert method, remembering
-//!   picks), appearance (popup theme) and startup;
+//! The Settings window (tray menu > Settings...), in five tabs:
+//! - General: typing (suggestions per word, insert method), learning
+//!   (remembering picks, completing words), appearance (popup theme) and
+//!   startup;
 //! - Shortcuts: Tamil mode's (presets or a custom combination) and convert
 //!   selection's;
 //! - Words: the learned words, to search, change, add and remove;
+//! - History: the typing history behind completions, to search and remove;
 //! - About: the app, who made it, and credits for the model and libraries.
+//!
+//! Each section has an icon from the Windows icon font (Segoe Fluent Icons,
+//! or Segoe MDL2 Assets before Windows 11).
 //!
 //! Modeless; it runs in the app's message loop (which routes its keys
 //! through IsDialogMessageW). OK calls the app's `apply` callback, which
@@ -13,24 +18,29 @@
 
 use std::cell::RefCell;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, FILETIME, HWND, LPARAM, LRESULT, RECT, SIZE, SYSTEMTIME, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    CLR_INVALID, COLOR_GRAYTEXT, COLOR_WINDOW, CreateCompatibleBitmap, CreateCompatibleDC,
-    CreateFontIndirectW, CreateSolidBrush, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
-    GetPixel, GetSysColor, GetSysColorBrush, GetTextExtentPoint32W, HBRUSH, HDC, HFONT, HGDIOBJ,
+    CLR_INVALID, COLOR_GRAYTEXT, COLOR_HOTLIGHT, COLOR_WINDOW, CreateCompatibleBitmap,
+    CreateCompatibleDC, CreateFontIndirectW, CreateSolidBrush, DEFAULT_CHARSET, DeleteDC,
+    DeleteObject, GetDC, GetMonitorInfoW, GetPixel, GetSysColor, GetSysColorBrush,
+    GetTextExtentPoint32W, GetTextFaceW, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, LOGFONTW,
     MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, ReleaseDC, SelectObject, SetBkMode,
     SetTextColor, TRANSPARENT,
 };
+use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Controls::{
     BST_CHECKED, BST_UNCHECKED, CheckDlgButton, EM_SETCUEBANNER, ICC_LINK_CLASS,
     ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
     IsDlgButtonChecked, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_PARAM, LVIF_TEXT, LVIS_SELECTED,
     LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETITEMW, LVM_GETNEXTITEM,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE,
-    LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHOWSELALWAYS, NM_CLICK, NM_RETURN,
-    NMHDR, NMLINK, NMLVKEYDOWN, TCIF_TEXT, TCITEMW, TCM_GETCURSEL, TCM_INSERTITEMW, TCN_SELCHANGE,
-    WC_LINK, WC_LISTVIEW, WC_TABCONTROLW,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMCOUNT,
+    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_GETDISPINFOW, LVN_ITEMCHANGED, LVN_KEYDOWN,
+    LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA,
+    LVS_REPORT, LVS_SHOWSELALWAYS, NM_CLICK, NM_RETURN, NMHDR, NMLINK, NMLVDISPINFOW, NMLVKEYDOWN,
+    TCIF_TEXT, TCITEMW, TCM_GETCURSEL, TCM_INSERTITEMW, TCN_SELCHANGE, WC_LINK, WC_LISTVIEW,
+    WC_TABCONTROLW,
 };
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForSystem, SystemParametersInfoForDpi,
@@ -58,13 +68,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
 use crate::config::{Config, InsertMode, Theme};
+use crate::history::{self, Entry, History};
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::learned;
 use crate::win::{instance, wide};
 
 const ID_HOTKEY: i32 = 10;
-const ID_TYPE: i32 = 11;
-const ID_PASTE: i32 = 12;
+const ID_INSERT: i32 = 11;
 const ID_BEAM: i32 = 13;
 const ID_AUTOSTART: i32 = 14;
 const ID_TABS: i32 = 15;
@@ -82,7 +92,15 @@ const ID_WORD_SAVE: i32 = 36;
 const ID_WORD_REMOVE: i32 = 37;
 const ID_WORD_CLEAR: i32 = 38;
 const ID_PREDICT: i32 = 39;
-const ID_CLEAR_HISTORY: i32 = 42;
+/// The History tab: list, search box, count and buttons.
+const ID_HISTORY: i32 = 42;
+const ID_HISTORY_SEARCH: i32 = 43;
+const ID_HISTORY_COUNT: i32 = 44;
+const ID_HISTORY_OPEN: i32 = 45;
+const ID_HISTORY_REMOVE: i32 = 46;
+const ID_HISTORY_CLEAR: i32 = 47;
+/// Section icons, drawn in the link colour.
+const ID_ICON: i32 = 48;
 /// Radio buttons for the presets, then "Custom".
 const ID_PRESET: i32 = 20;
 const ID_CUSTOM: i32 = ID_PRESET + PRESETS.len() as i32;
@@ -97,6 +115,21 @@ const THEMES: [(Theme, &str); 3] = [
     (Theme::Light, "Light"),
     (Theme::Dark, "Dark"),
 ];
+/// Insert methods, in the dropdown's order.
+const INSERT_MODES: [(InsertMode, &str); 2] = [
+    (InsertMode::Unicode, "Typing the characters"),
+    (InsertMode::Clipboard, "Pasting"),
+];
+/// Section icons: glyphs of Segoe Fluent Icons / Segoe MDL2 Assets.
+const ICON_TYPING: char = '\u{E765}'; // keyboard
+const ICON_LEARNING: char = '\u{EA80}'; // light bulb
+const ICON_APPEARANCE: char = '\u{E790}'; // palette
+const ICON_STARTUP: char = '\u{E7E8}'; // power
+const ICON_TAMIL_MODE: char = '\u{E8AB}'; // switch
+const ICON_CONVERT: char = '\u{E8AC}'; // rename
+const ICON_WORDS: char = '\u{E82D}'; // dictionary
+const ICON_HISTORY: char = '\u{E81C}'; // history
+const ICON_CREDITS: char = '\u{EB51}'; // heart
 /// Suggestions per word offered in the dropdown.
 const BEAM_CHOICES: std::ops::RangeInclusive<usize> = 3..=9;
 /// Shortcut presets and an optional note shown beside each.
@@ -122,6 +155,11 @@ pub struct Values {
     pub autostart: bool,
     /// The learned words as (romanized key, Tamil word), sorted by key.
     pub learned: Vec<(String, String)>,
+    /// The typing history, most used first (shown on the History tab).
+    pub history: Vec<Entry>,
+    /// On OK: the (key, word) pairs removed from the history (so words
+    /// typed while the window is open aren't lost).
+    pub forget: Vec<(String, String)>,
 }
 
 /// Validates, applies and saves; Err(message) keeps the window open.
@@ -132,16 +170,19 @@ pub struct Actions {
     pub apply: Apply,
     /// The model's suggestions for a romanized word (the Words tab's dropdown).
     pub suggest: fn(&str) -> Vec<String>,
-    /// Clears the typing history now (the "Clear typing history…" button).
-    pub clear_history: fn() -> Result<(), String>,
     /// Runs when the window closes, whether by OK or Cancel.
     pub on_close: fn(),
 }
+
+/// A local calendar day: (year, month, day).
+type Day = (u16, u16, u16);
 
 struct Window {
     hwnd: HWND,
     font: HFONT,
     title_font: HFONT,
+    section_font: HFONT,
+    icon_font: HFONT,
     logo: Option<HICON>,
     /// The tab page's background, behind the labels and buttons on it.
     page_brush: HBRUSH,
@@ -150,15 +191,21 @@ struct Window {
     hotkey: String,
     convert: String,
     /// Controls of each tab, shown or hidden as the tab changes.
-    pages: [Vec<HWND>; 4],
+    pages: [Vec<HWND>; 5],
     /// The learned words being edited, sorted by key (applied on OK).
     learned: Vec<(String, String)>,
+    /// The typing history left, the indexes into it the list shows (those
+    /// matching the search), and the words removed (applied on OK).
+    history: Vec<Entry>,
+    history_rows: Vec<usize>,
+    forget: Vec<(String, String)>,
+    /// Today and yesterday, for the "Last used" column.
+    days: Option<[Day; 2]>,
     /// Set while the Words tab's boxes are filled in by code, so their
     /// change notifications are ignored.
     filling: bool,
     apply: Apply,
     suggest: fn(&str) -> Vec<String>,
-    clear_history: fn() -> Result<(), String>,
     on_close: fn(),
 }
 
@@ -235,14 +282,18 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
         title_lf.lfHeight = title_lf.lfHeight * 3 / 2;
         title_lf.lfWeight = 700;
         let title_font = CreateFontIndirectW(&title_lf);
+        let mut section_lf = ncm.lfMessageFont;
+        section_lf.lfHeight = section_lf.lfHeight * 5 / 4;
+        section_lf.lfWeight = 600;
+        let section_font = CreateFontIndirectW(&section_lf);
 
-        // Client area 500 x 476 (96-DPI units), centred on the primary monitor.
+        // Client area 500 x 542 (96-DPI units), centred on the primary monitor.
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut r = RECT {
             left: 0,
             top: 0,
             right: s(500),
-            bottom: s(476),
+            bottom: s(542),
         };
         let _ = AdjustWindowRectExForDpi(&mut r, style, false, WINDOW_EX_STYLE(0), dpi);
         let (w, h) = (r.right - r.left, r.bottom - r.top);
@@ -269,6 +320,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             Some(instance()),
             None,
         )?;
+        let icon_font = icon_font(hwnd, ncm.lfMessageFont.lfHeight * 3 / 2);
 
         // Width of `text` in the message font, in 96-DPI units.
         let text_width = |text: &str| {
@@ -313,7 +365,6 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
         };
         let none = WINDOW_EX_STYLE(0);
         let tab = WS_TABSTOP.0;
-        const SS_ETCHEDHORZ: u32 = 0x10;
         const SS_ICON: u32 = 0x3;
         const SS_REALSIZECONTROL: u32 = 0x40;
         const X: i32 = 28; // left edge of tab content
@@ -326,9 +377,9 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_CLIPSIBLINGS.0,
             none,
             ID_TABS,
-            (12, 10, 476, 414),
+            (12, 10, 476, 480),
         )?;
-        for (i, name) in ["General", "Shortcuts", "Words", "About"]
+        for (i, name) in ["General", "Shortcuts", "Words", "History", "About"]
             .iter()
             .enumerate()
         {
@@ -348,33 +399,117 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
 
         let page_brush = page_brush(tabs, s(24), s(60));
 
-        // A section heading: its name and a divider line to the right.
-        let section = |name: &str, y: i32| -> windows::core::Result<Vec<HWND>> {
-            let width = text_width(name) + 2;
-            Ok(vec![
-                child(w!("STATIC"), name, 0, none, -1, (X, y, width, 20))?,
-                child(
-                    w!("STATIC"),
-                    "",
-                    SS_ETCHEDHORZ,
-                    none,
-                    -1,
-                    (X + width + 8, y + 10, RIGHT - X - width - 8, 1),
-                )?,
-            ])
+        // A section heading: an icon and the section's name.
+        let section = |icon: char, name: &str, y: i32| -> windows::core::Result<Vec<HWND>> {
+            let glyph = child(
+                w!("STATIC"),
+                &icon.to_string(),
+                0,
+                none,
+                ID_ICON,
+                (X, y + 1, 22, 22),
+            )?;
+            SendMessageW(
+                glyph,
+                WM_SETFONT,
+                Some(WPARAM(icon_font.0 as usize)),
+                Some(LPARAM(1)),
+            );
+            let title = child(w!("STATIC"), name, 0, none, -1, (X + 30, y, 300, 24))?;
+            SendMessageW(
+                title,
+                WM_SETFONT,
+                Some(WPARAM(section_font.0 as usize)),
+                Some(LPARAM(1)),
+            );
+            Ok(vec![glyph, title])
         };
         let muted = |text: &str, rect| child(w!("STATIC"), text, 0, none, ID_MUTED, rect);
+        // A setting's help line, from `x` to the right edge.
+        let help = |text: &str, x: i32, y: i32| muted(text, (x, y, RIGHT - x, 18));
+        const CHECK_TEXT: i32 = 19; // a checkbox's label, from its left edge
 
-        // ---------------------------------------------------------------- General
+        // A search box at the left of row `y` and a count at its right.
+        let search_row = |search_id: i32, count_id: i32, y: i32| -> windows::core::Result<_> {
+            let search = child(
+                w!("EDIT"),
+                "",
+                tab | WS_GROUP.0 | ES_AUTOHSCROLL as u32,
+                WS_EX_CLIENTEDGE,
+                search_id,
+                (X, y, 220, 24),
+            )?;
+            let cue = wide("Search");
+            SendMessageW(
+                search,
+                EM_SETCUEBANNER,
+                Some(WPARAM(1)),
+                Some(LPARAM(cue.as_ptr() as isize)),
+            );
+            const SS_RIGHT: u32 = 0x2;
+            let count = child(
+                w!("STATIC"),
+                "",
+                SS_RIGHT,
+                none,
+                count_id,
+                (RIGHT - 200, y + 4, 200, 18),
+            )?;
+            Ok((search, count))
+        };
+        // A list with full-row selection and these (title, width) columns.
+        let list_view = |id: i32,
+                         style: u32,
+                         rect: (i32, i32, i32, i32),
+                         columns: &[(&str, i32)]|
+         -> windows::core::Result<HWND> {
+            let list = child(
+                WC_LISTVIEW,
+                "",
+                tab | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | style,
+                WS_EX_CLIENTEDGE,
+                id,
+                rect,
+            )?;
+            let ex = (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as usize;
+            SendMessageW(
+                list,
+                LVM_SETEXTENDEDLISTVIEWSTYLE,
+                Some(WPARAM(ex)),
+                Some(LPARAM(ex as isize)),
+            );
+            for (i, (title, width)) in columns.iter().enumerate() {
+                let mut text = wide(title);
+                let column = LVCOLUMNW {
+                    mask: LVCF_TEXT | LVCF_WIDTH,
+                    cx: s(*width),
+                    pszText: PWSTR(text.as_mut_ptr()),
+                    ..Default::default()
+                };
+                SendMessageW(
+                    list,
+                    LVM_INSERTCOLUMNW,
+                    Some(WPARAM(i)),
+                    Some(LPARAM(&column as *const _ as isize)),
+                );
+            }
+            Ok(list)
+        };
+
         let mut general = Vec::new();
-        general.extend(section("Typing", 48)?);
+        general.extend(section(ICON_TYPING, "Typing", 48)?);
         general.push(child(
             w!("STATIC"),
             "Suggestions per word",
             0,
             none,
             -1,
-            (X, 74, 200, 20),
+            (X, 82, 250, 20),
+        )?);
+        general.push(help(
+            "More suggestions take a little longer to show.",
+            X,
+            102,
         )?);
         let beam = child(
             w!("COMBOBOX"),
@@ -382,7 +517,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_GROUP.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32,
             none,
             ID_BEAM,
-            (RIGHT - 80, 70, 80, 200),
+            (RIGHT - 80, 88, 80, 200),
         )?;
         general.push(beam);
         general.push(child(
@@ -391,64 +526,59 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             0,
             none,
             -1,
-            (X, 104, 200, 20),
+            (X, 132, 250, 20),
         )?);
-        for (i, (label, note)) in [
-            ("Typing the characters", "works in most apps"),
-            ("Pasting", "for apps that garble typed Tamil"),
-        ]
-        .iter()
-        .enumerate()
-        {
-            let y = 126 + 24 * i as i32;
-            let first = if i == 0 { WS_GROUP.0 | tab } else { 0 };
-            general.push(child(
-                w!("BUTTON"),
-                label,
-                first | BS_AUTORADIOBUTTON as u32,
-                none,
-                ID_TYPE + i as i32,
-                (X + 16, y, 180, 22),
-            )?);
-            general.push(muted(note, (X + 200, y + 2, 240, 18))?);
-        }
+        general.push(help(
+            "Pasting is for apps that garble typed Tamil.",
+            X,
+            152,
+        )?);
+        let insert = child(
+            w!("COMBOBOX"),
+            "",
+            tab | WS_GROUP.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32,
+            none,
+            ID_INSERT,
+            (RIGHT - 180, 138, 180, 200),
+        )?;
+        general.push(insert);
+
+        general.extend(section(ICON_LEARNING, "Learning", 190)?);
         general.push(child(
             w!("BUTTON"),
             "Remember the suggestions I pick",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_REMEMBER,
-            (X, 180, 270, 22),
+            (X, 222, 330, 22),
         )?);
-        general.push(muted(
-            "see and edit them on the Words tab",
-            (X + 280, 182, RIGHT - X - 280, 18),
+        general.push(help(
+            "Your picks come first next time. Edit them on the Words tab.",
+            X + CHECK_TEXT,
+            244,
         )?);
         general.push(child(
             w!("BUTTON"),
-            "Complete words as I type (Tab)",
+            "Complete words as I type",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_PREDICT,
-            (X, 210, 250, 22),
+            (X, 270, 330, 22),
         )?);
-        general.push(child(
-            w!("BUTTON"),
-            "Clear typing history…",
-            tab | BS_PUSHBUTTON as u32,
-            none,
-            ID_CLEAR_HISTORY,
-            (RIGHT - 160, 208, 160, 26),
+        general.push(help(
+            "After 3 letters, Tab inserts the rest of the word. See the History tab.",
+            X + CHECK_TEXT,
+            292,
         )?);
 
-        general.extend(section("Appearance", 246)?);
+        general.extend(section(ICON_APPEARANCE, "Appearance", 330)?);
         general.push(child(
             w!("STATIC"),
             "Popup theme",
             0,
             none,
             -1,
-            (X, 272, 200, 20),
+            (X, 366, 200, 20),
         )?);
         let theme = child(
             w!("COMBOBOX"),
@@ -456,26 +586,26 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_GROUP.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32,
             none,
             ID_THEME,
-            (RIGHT - 160, 268, 160, 200),
+            (RIGHT - 180, 362, 180, 200),
         )?;
         general.push(theme);
 
-        general.extend(section("Startup", 310)?);
+        general.extend(section(ICON_STARTUP, "Startup", 404)?);
         general.push(child(
             w!("BUTTON"),
             "Start Ezhuthu when I sign in to Windows",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_AUTOSTART,
-            (X, 334, 420, 22),
+            (X, 436, 420, 22),
         )?);
 
         // -------------------------------------------------------------- Shortcuts
         let mut shortcuts = Vec::new();
-        shortcuts.extend(section("Tamil mode", 48)?);
+        shortcuts.extend(section(ICON_TAMIL_MODE, "Tamil mode", 48)?);
         shortcuts.push(muted(
             "Press it anywhere to turn Tamil typing on or off.",
-            (X, 72, 420, 18),
+            (X, 76, 420, 18),
         )?);
         for (i, (keys, note)) in PRESETS.iter().enumerate() {
             let y = 96 + 24 * i as i32;
@@ -528,12 +658,12 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             (X + 282, custom_y + 2, 150, 18),
         )?);
 
-        shortcuts.extend(section("Convert selection", 232)?);
+        shortcuts.extend(section(ICON_CONVERT, "Convert selection", 232)?);
         shortcuts.push(muted(
             "Select text typed in English letters in any app, then press this to",
-            (X, 256, 440, 18),
+            (X, 258, 440, 18),
         )?);
-        shortcuts.push(muted("turn it into Tamil.", (X, 274, 440, 18))?);
+        shortcuts.push(muted("turn it into Tamil.", (X, 276, 440, 18))?);
         shortcuts.push(child(
             w!("BUTTON"),
             "Shortcut",
@@ -554,77 +684,26 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
 
         // ------------------------------------------------------------------ Words
         let mut words = Vec::new();
-        words.extend(section("Learned words", 48)?);
+        words.extend(section(ICON_WORDS, "Learned words", 48)?);
         words.push(muted(
             "Suggestions you picked over the first one. They come first next time.",
-            (X, 72, RIGHT - X, 18),
+            (X, 76, RIGHT - X, 18),
         )?);
-        let search = child(
-            w!("EDIT"),
-            "",
-            tab | WS_GROUP.0 | ES_AUTOHSCROLL as u32,
-            WS_EX_CLIENTEDGE,
-            ID_WORD_SEARCH,
-            (X, 96, 220, 24),
-        )?;
-        let cue = wide("Search");
-        SendMessageW(
-            search,
-            EM_SETCUEBANNER,
-            Some(WPARAM(1)),
-            Some(LPARAM(cue.as_ptr() as isize)),
-        );
-        words.push(search);
-        const SS_RIGHT: u32 = 0x2;
-        words.push(child(
-            w!("STATIC"),
-            "",
-            SS_RIGHT,
-            none,
-            ID_WORD_COUNT,
-            (RIGHT - 200, 100, 200, 18),
-        )?);
-        let list = child(
-            WC_LISTVIEW,
-            "",
-            tab | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
-            WS_EX_CLIENTEDGE,
+        let (search, count) = search_row(ID_WORD_SEARCH, ID_WORD_COUNT, 96)?;
+        words.extend([search, count]);
+        words.push(list_view(
             ID_WORDS,
-            (X, 128, RIGHT - X, 174),
-        )?;
-        let ex = (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as usize;
-        SendMessageW(
-            list,
-            LVM_SETEXTENDEDLISTVIEWSTYLE,
-            Some(WPARAM(ex)),
-            Some(LPARAM(ex as isize)),
-        );
-        for (i, (title, width)) in [("You type", 150), ("Shows first", RIGHT - X - 150 - 24)]
-            .into_iter()
-            .enumerate()
-        {
-            let mut text = wide(title);
-            let column = LVCOLUMNW {
-                mask: LVCF_TEXT | LVCF_WIDTH,
-                cx: s(width),
-                pszText: PWSTR(text.as_mut_ptr()),
-                ..Default::default()
-            };
-            SendMessageW(
-                list,
-                LVM_INSERTCOLUMNW,
-                Some(WPARAM(i)),
-                Some(LPARAM(&column as *const _ as isize)),
-            );
-        }
-        words.push(list);
+            0,
+            (X, 128, RIGHT - X, 240),
+            &[("You type", 150), ("Shows first", RIGHT - X - 150 - 24)],
+        )?);
         words.push(child(
             w!("STATIC"),
             "You type",
             0,
             none,
             -1,
-            (X, 312, 160, 18),
+            (X, 378, 160, 18),
         )?);
         words.push(child(
             w!("STATIC"),
@@ -632,7 +711,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             0,
             none,
             -1,
-            (X + 172, 312, 200, 18),
+            (X + 172, 378, 200, 18),
         )?);
         words.push(child(
             w!("EDIT"),
@@ -640,7 +719,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_GROUP.0 | ES_AUTOHSCROLL as u32,
             WS_EX_CLIENTEDGE,
             ID_WORD_KEY,
-            (X, 332, 160, 24),
+            (X, 398, 160, 24),
         )?);
         words.push(child(
             w!("COMBOBOX"),
@@ -648,7 +727,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_VSCROLL.0 | (CBS_DROPDOWN | CBS_AUTOHSCROLL) as u32,
             none,
             ID_WORD_TAMIL,
-            (X + 172, 331, RIGHT - X - 172, 200),
+            (X + 172, 397, RIGHT - X - 172, 200),
         )?);
         words.push(child(
             w!("BUTTON"),
@@ -656,7 +735,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_GROUP.0 | BS_PUSHBUTTON as u32,
             none,
             ID_WORD_SAVE,
-            (X, 368, 100, 26),
+            (X, 434, 100, 26),
         )?);
         words.push(child(
             w!("BUTTON"),
@@ -664,7 +743,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | BS_PUSHBUTTON as u32,
             none,
             ID_WORD_REMOVE,
-            (X + 108, 368, 100, 26),
+            (X + 108, 434, 100, 26),
         )?);
         words.push(child(
             w!("BUTTON"),
@@ -672,10 +751,55 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | BS_PUSHBUTTON as u32,
             none,
             ID_WORD_CLEAR,
-            (RIGHT - 110, 368, 110, 26),
+            (RIGHT - 110, 434, 110, 26),
         )?);
 
-        // ---------------------------------------------------------------- About
+        // ---------------------------------------------------------------- History
+        let mut history = Vec::new();
+        history.extend(section(ICON_HISTORY, "Typing history", 48)?);
+        history.push(muted(
+            "Words you typed in Tamil mode. Completions come from here, most used first.",
+            (X, 76, RIGHT - X, 18),
+        )?);
+        let (search, count) = search_row(ID_HISTORY_SEARCH, ID_HISTORY_COUNT, 96)?;
+        history.extend([search, count]);
+        // Virtual (the window supplies each cell): it can hold 20,000 words.
+        history.push(list_view(
+            ID_HISTORY,
+            LVS_OWNERDATA,
+            (X, 128, RIGHT - X, 296),
+            &[
+                ("You typed", 120),
+                ("Tamil", 150),
+                ("Used", 56),
+                ("Last used", RIGHT - X - 120 - 150 - 56 - 24),
+            ],
+        )?);
+        history.push(child(
+            w!("BUTTON"),
+            "Open file",
+            tab | WS_GROUP.0 | BS_PUSHBUTTON as u32,
+            none,
+            ID_HISTORY_OPEN,
+            (X, 434, 100, 26),
+        )?);
+        history.push(child(
+            w!("BUTTON"),
+            "Remove",
+            tab | BS_PUSHBUTTON as u32,
+            none,
+            ID_HISTORY_REMOVE,
+            (RIGHT - 218, 434, 100, 26),
+        )?);
+        history.push(child(
+            w!("BUTTON"),
+            "Remove all…",
+            tab | BS_PUSHBUTTON as u32,
+            none,
+            ID_HISTORY_CLEAR,
+            (RIGHT - 110, 434, 110, 26),
+        )?);
+
         let mut about = Vec::new();
         let logo_ctl = child(
             w!("STATIC"),
@@ -740,7 +864,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             (X, 146, 440, 20),
         )?);
 
-        about.extend(section("Credits", 184)?);
+        about.extend(section(ICON_CREDITS, "Credits", 184)?);
         let credits: [(&str, &str, &str); 4] = [
             (
                 "Transliteration model: IndicXlit by AI4Bharat",
@@ -780,7 +904,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
                 )?);
             }
         }
-        for ctl in shortcuts.iter().chain(&words).chain(&about) {
+        for ctl in shortcuts.iter().chain(&words).chain(&history).chain(&about) {
             let _ = ShowWindow(*ctl, SW_HIDE);
         }
 
@@ -790,7 +914,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_GROUP.0 | BS_DEFPUSHBUTTON as u32,
             none,
             IDOK.0,
-            (320, 436, 80, 28),
+            (320, 502, 80, 28),
         )?;
         child(
             w!("BUTTON"),
@@ -798,78 +922,110 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | BS_PUSHBUTTON as u32,
             none,
             IDCANCEL.0,
-            (408, 436, 80, 28),
+            (408, 502, 80, 28),
         )?;
 
         // Current values.
         let selected = preset.map_or(ID_CUSTOM, |i| ID_PRESET + i as i32);
         let _ = CheckDlgButton(hwnd, selected, BST_CHECKED);
         let _ = EnableWindow(custom_box, preset.is_none());
-        let radio = if values.insert_mode == InsertMode::Clipboard {
-            ID_PASTE
-        } else {
-            ID_TYPE
+        let fill_combo = |combo: HWND, labels: &[String], selected: usize| {
+            for label in labels {
+                SendMessageW(
+                    combo,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(HSTRING::from(label.as_str()).as_ptr() as isize)),
+                );
+            }
+            SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(selected)), None);
         };
-        let _ = CheckDlgButton(hwnd, radio, BST_CHECKED);
-        for n in BEAM_CHOICES {
-            SendMessageW(
-                beam,
-                CB_ADDSTRING,
-                None,
-                Some(LPARAM(HSTRING::from(n.to_string()).as_ptr() as isize)),
-            );
-        }
+        let beams: Vec<String> = BEAM_CHOICES.map(|n| n.to_string()).collect();
         let beam_index = values
             .beam
             .clamp(*BEAM_CHOICES.start(), *BEAM_CHOICES.end())
             - BEAM_CHOICES.start();
-        SendMessageW(beam, CB_SETCURSEL, Some(WPARAM(beam_index)), None);
-        let check = |on: bool| if on { BST_CHECKED } else { BST_UNCHECKED };
-        for (_, label) in THEMES {
-            SendMessageW(
-                theme,
-                CB_ADDSTRING,
-                None,
-                Some(LPARAM(HSTRING::from(label).as_ptr() as isize)),
-            );
-        }
+        fill_combo(beam, &beams, beam_index);
+        let modes: Vec<String> = INSERT_MODES.iter().map(|(_, l)| l.to_string()).collect();
+        let mode_index = INSERT_MODES
+            .iter()
+            .position(|(m, _)| *m == values.insert_mode);
+        fill_combo(insert, &modes, mode_index.unwrap_or(0));
+        let themes: Vec<String> = THEMES.iter().map(|(_, l)| l.to_string()).collect();
         let theme_index = THEMES.iter().position(|(t, _)| *t == values.theme);
-        SendMessageW(
-            theme,
-            CB_SETCURSEL,
-            Some(WPARAM(theme_index.unwrap_or(0))),
-            None,
-        );
+        fill_combo(theme, &themes, theme_index.unwrap_or(0));
+        let check = |on: bool| if on { BST_CHECKED } else { BST_UNCHECKED };
         let _ = CheckDlgButton(hwnd, ID_REMEMBER, check(values.remember_picks));
         let _ = CheckDlgButton(hwnd, ID_PREDICT, check(values.predict));
         let _ = CheckDlgButton(hwnd, ID_AUTOSTART, check(values.autostart));
         let _ = CheckDlgButton(hwnd, ID_CONVERT_ON, check(convert_on));
         let _ = EnableWindow(convert_box, convert_on);
 
+        let now = history::now();
+        let days = local_day(now).zip(local_day(now.saturating_sub(24 * 60 * 60)));
         WINDOW.with(|cell| {
             *cell.borrow_mut() = Some(Window {
                 hwnd,
                 font,
                 title_font,
+                section_font,
+                icon_font,
                 logo,
                 page_brush,
                 hotkey: custom_text,
                 convert: convert_text,
-                pages: [general, shortcuts, words, about],
+                pages: [general, shortcuts, words, history, about],
                 learned: values.learned.clone(),
+                history: values.history,
+                history_rows: Vec::new(),
+                forget: Vec::new(),
+                days: days.map(|(today, yesterday)| [today, yesterday]),
                 filling: false,
                 apply: actions.apply,
                 suggest: actions.suggest,
-                clear_history: actions.clear_history,
                 on_close: actions.on_close,
             });
         });
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         refresh_words(hwnd);
+        refresh_history(hwnd);
         let _ = SetFocus(Some(beam));
     }
     Ok(())
+}
+
+/// The Windows icon font at `height` (a LOGFONT height): Segoe Fluent Icons,
+/// else (before Windows 11) Segoe MDL2 Assets, which has the same glyphs.
+fn icon_font(hwnd: HWND, height: i32) -> HFONT {
+    let faces = ["Segoe Fluent Icons", "Segoe MDL2 Assets"];
+    for (i, face) in faces.iter().enumerate() {
+        let mut lf = LOGFONTW {
+            lfHeight: height,
+            lfCharSet: DEFAULT_CHARSET,
+            ..Default::default()
+        };
+        for (dst, src) in lf.lfFaceName.iter_mut().zip(face.encode_utf16()) {
+            *dst = src;
+        }
+        // SAFETY: a font selected into the window's DC just to read the face
+        // Windows picked, then deselected; a font that isn't kept is deleted.
+        unsafe {
+            let font = CreateFontIndirectW(&lf);
+            let dc = GetDC(Some(hwnd));
+            let old = SelectObject(dc, HGDIOBJ(font.0));
+            let mut name = [0u16; 32];
+            GetTextFaceW(dc, Some(&mut name));
+            SelectObject(dc, old);
+            ReleaseDC(Some(hwnd), dc);
+            let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+            if String::from_utf16_lossy(&name[..len]) == *face || i == faces.len() - 1 {
+                return font;
+            }
+            let _ = DeleteObject(HGDIOBJ(font.0));
+        }
+    }
+    unreachable!("the last face is always kept")
 }
 
 fn warn(hwnd: HWND, text: &str) {
@@ -904,6 +1060,7 @@ fn read(
     custom: String,
     convert: String,
     learned: Vec<(String, String)>,
+    forget: Vec<(String, String)>,
 ) -> Result<Values, String> {
     let hotkey = match (0..PRESETS.len()).find(|&i| checked(hwnd, ID_PRESET + i as i32)) {
         Some(i) => PRESETS[i].0.to_string(),
@@ -921,11 +1078,7 @@ fn read(
         }
         true => convert,
     };
-    let insert_mode = if checked(hwnd, ID_PASTE) {
-        InsertMode::Clipboard
-    } else {
-        InsertMode::Unicode
-    };
+    let insert_mode = INSERT_MODES[selection(hwnd, ID_INSERT).min(INSERT_MODES.len() - 1)].0;
     let beam = (BEAM_CHOICES.start() + selection(hwnd, ID_BEAM)).min(*BEAM_CHOICES.end());
     Ok(Values {
         hotkey,
@@ -937,6 +1090,8 @@ fn read(
         theme: THEMES[selection(hwnd, ID_THEME).min(THEMES.len() - 1)].0,
         autostart: checked(hwnd, ID_AUTOSTART),
         learned,
+        history: Vec::new(),
+        forget,
     })
 }
 
@@ -1027,64 +1182,106 @@ fn refresh_words(hwnd: HWND) {
             rows += 1;
         }
     }
-    let count = match (filter.is_empty(), words.len()) {
-        (true, 1) => "1 word".to_string(),
-        (true, n) => format!("{n} words"),
-        (false, n) => format!("{rows} of {n}"),
-    };
-    fill_text(item(hwnd, ID_WORD_COUNT), &count);
+    fill_text(
+        item(hwnd, ID_WORD_COUNT),
+        &count_text(!filter.is_empty(), rows as usize, words.len()),
+    );
 }
 
-/// Indexes (into the learned list) of the selected rows.
-fn selected_words(hwnd: HWND) -> Vec<usize> {
-    let list = item(hwnd, ID_WORDS);
+/// "3 words", or with a search "1 of 3".
+fn count_text(searching: bool, shown: usize, total: usize) -> String {
+    match (searching, total) {
+        (false, 1) => "1 word".to_string(),
+        (false, n) => format!("{n} words"),
+        (true, n) => format!("{shown} of {n}"),
+    }
+}
+
+/// The selected rows of a list.
+fn selected_rows(list: HWND) -> Vec<usize> {
     let mut out = Vec::new();
     let mut at: isize = -1;
-    // SAFETY: querying our own list; the item struct outlives each message.
-    unsafe {
-        loop {
-            at = SendMessageW(
+    loop {
+        // SAFETY: querying our own list.
+        at = unsafe {
+            SendMessageW(
                 list,
                 LVM_GETNEXTITEM,
                 Some(WPARAM(at as usize)),
                 Some(LPARAM(LVNI_SELECTED as isize)),
             )
-            .0;
-            if at < 0 {
-                break;
-            }
-            let mut row = LVITEMW {
-                mask: LVIF_PARAM,
-                iItem: at as i32,
-                ..Default::default()
-            };
-            SendMessageW(
-                list,
-                LVM_GETITEMW,
-                None,
-                Some(LPARAM(&mut row as *mut _ as isize)),
-            );
-            out.push(row.lParam.0 as usize);
         }
+        .0;
+        if at < 0 {
+            return out;
+        }
+        out.push(at as usize);
     }
-    out
 }
 
-/// Selects (only) the row showing learned word `index`, if it is shown.
-fn select_word(hwnd: HWND, index: usize) {
-    let list = item(hwnd, ID_WORDS);
-    // SAFETY: setting the state of our own list's rows.
+/// Selects (only) row `row` of a list, or none.
+fn select_row(list: HWND, row: Option<usize>) {
+    let none = LVITEMW {
+        stateMask: LVIS_SELECTED,
+        ..Default::default()
+    };
+    let selected = LVITEMW {
+        state: LVIS_SELECTED,
+        stateMask: LVIS_SELECTED,
+        ..Default::default()
+    };
+    // SAFETY: setting the state of our own list's rows; the structs outlive
+    // each message.
     unsafe {
-        let none = LVITEMW {
-            stateMask: LVIS_SELECTED,
-            ..Default::default()
-        };
         SendMessageW(
             list,
             LVM_SETITEMSTATE,
             Some(WPARAM(usize::MAX)),
             Some(LPARAM(&none as *const _ as isize)),
         );
+        if let Some(row) = row {
+            SendMessageW(
+                list,
+                LVM_SETITEMSTATE,
+                Some(WPARAM(row)),
+                Some(LPARAM(&selected as *const _ as isize)),
+            );
+            SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(row)), None);
+        }
+    }
+}
+
+/// Indexes (into the learned list) of the selected rows.
+fn selected_words(hwnd: HWND) -> Vec<usize> {
+    let list = item(hwnd, ID_WORDS);
+    selected_rows(list)
+        .into_iter()
+        .map(|at| {
+            let mut row = LVITEMW {
+                mask: LVIF_PARAM,
+                iItem: at as i32,
+                ..Default::default()
+            };
+            // SAFETY: reading our own list's row; the struct outlives the message.
+            unsafe {
+                SendMessageW(
+                    list,
+                    LVM_GETITEMW,
+                    None,
+                    Some(LPARAM(&mut row as *mut _ as isize)),
+                );
+            }
+            row.lParam.0 as usize
+        })
+        .collect()
+}
+
+/// Selects (only) the row showing learned word `index`, if it is shown.
+fn select_word(hwnd: HWND, index: usize) {
+    let list = item(hwnd, ID_WORDS);
+    select_row(list, None);
+    // SAFETY: reading our own list's rows.
+    unsafe {
         let mut at: isize = -1;
         loop {
             at = SendMessageW(list, LVM_GETNEXTITEM, Some(WPARAM(at as usize)), None).0;
@@ -1103,18 +1300,7 @@ fn select_word(hwnd: HWND, index: usize) {
                 Some(LPARAM(&mut row as *mut _ as isize)),
             );
             if row.lParam.0 as usize == index {
-                let selected = LVITEMW {
-                    state: LVIS_SELECTED,
-                    stateMask: LVIS_SELECTED,
-                    ..Default::default()
-                };
-                SendMessageW(
-                    list,
-                    LVM_SETITEMSTATE,
-                    Some(WPARAM(at as usize)),
-                    Some(LPARAM(&selected as *const _ as isize)),
-                );
-                SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(at as usize)), None);
+                select_row(list, Some(at as usize));
                 return;
             }
         }
@@ -1234,29 +1420,6 @@ fn on_word_remove(hwnd: HWND) {
 }
 
 /// "Remove all…": asks, then empties the list.
-/// "Clear typing history…": asks, then clears it straight away.
-fn on_clear_history(hwnd: HWND) {
-    let Some(clear) = WINDOW.with(|w| w.borrow().as_ref().map(|w| w.clear_history)) else {
-        return;
-    };
-    // SAFETY: a message box owned by our window; both strings are valid.
-    let answer = unsafe {
-        MessageBoxW(
-            Some(hwnd),
-            w!(
-                "Clear the words Ezhuthu has kept from your typing?\n\nPredictions then come from the dictionary only, until you type more."
-            ),
-            w!("Ezhuthu settings"),
-            MB_YESNO | MB_ICONQUESTION,
-        )
-    };
-    if answer == IDYES
-        && let Err(msg) = clear()
-    {
-        warn(hwnd, &msg);
-    }
-}
-
 fn on_word_clear(hwnd: HWND) {
     if learned_words().is_empty() {
         return;
@@ -1283,8 +1446,179 @@ fn on_word_clear(hwnd: HWND) {
     }
 }
 
+// ---------------------------------------------------------------- History tab
+
+/// Shows the history words matching the search box (the list asks for
+/// each cell as it draws: see `history_cell`).
+fn refresh_history(hwnd: HWND) {
+    let filter = text_of(item(hwnd, ID_HISTORY_SEARCH)).trim().to_lowercase();
+    let (rows, total) = WINDOW
+        .with(|w| {
+            let mut w = w.borrow_mut();
+            let w = w.as_mut()?;
+            w.history_rows = (w.history.iter().enumerate())
+                .filter(|(_, e)| {
+                    filter.is_empty() || e.key.contains(&filter) || e.word.contains(&filter)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            Some((w.history_rows.len(), w.history.len()))
+        })
+        .unwrap_or_default();
+    let list = item(hwnd, ID_HISTORY);
+    select_row(list, None);
+    // SAFETY: resizing and redrawing our own list.
+    unsafe {
+        SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(rows)), None);
+        let _ = InvalidateRect(Some(list), None, true);
+    }
+    fill_text(
+        item(hwnd, ID_HISTORY_COUNT),
+        &count_text(!filter.is_empty(), rows, total),
+    );
+}
+
+/// The list asks for a cell's text: copies it into the list's buffer.
+fn history_cell(info: &mut NMLVDISPINFOW) {
+    let cell = &mut info.item;
+    if (cell.mask & LVIF_TEXT).0 == 0 || cell.pszText.is_null() || cell.cchTextMax <= 0 {
+        return;
+    }
+    let text = WINDOW.with(|w| {
+        let w = w.borrow();
+        let w = w.as_ref()?;
+        let entry = w.history.get(*w.history_rows.get(cell.iItem as usize)?)?;
+        Some(match cell.iSubItem {
+            0 => entry.key.clone(),
+            1 => entry.word.clone(),
+            2 => entry.count.to_string(),
+            _ => match (w.days, local_day(entry.last)) {
+                (Some([today, yesterday]), Some(day)) => day_label(day, today, yesterday),
+                _ => String::new(),
+            },
+        })
+    });
+    let units: Vec<u16> = (text.unwrap_or_default().encode_utf16())
+        .take(cell.cchTextMax as usize - 1)
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: the list's buffer holds cchTextMax units; at most that many
+    // (with the NUL) are written.
+    unsafe { std::ptr::copy_nonoverlapping(units.as_ptr(), cell.pszText.0, units.len()) };
+}
+
+/// The local calendar day of Unix time `secs`.
+fn local_day(secs: u64) -> Option<Day> {
+    // FILETIME counts 100 ns steps from 1601.
+    let t = (secs + 11_644_473_600) * 10_000_000;
+    let file_time = FILETIME {
+        dwLowDateTime: t as u32,
+        dwHighDateTime: (t >> 32) as u32,
+    };
+    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    // SAFETY: plain conversions between our own structs.
+    unsafe {
+        FileTimeToSystemTime(&file_time, &mut utc).ok()?;
+        SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()?;
+    }
+    Some((local.wYear, local.wMonth, local.wDay))
+}
+
+/// "Today", "Yesterday", "21 Oct" this year, else "21 Oct 2025".
+fn day_label(day: Day, today: Day, yesterday: Day) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (year, month, date) = day;
+    let month = MONTHS[(month.clamp(1, 12) - 1) as usize];
+    if day == today {
+        "Today".into()
+    } else if day == yesterday {
+        "Yesterday".into()
+    } else if year == today.0 {
+        format!("{date} {month}")
+    } else {
+        format!("{date} {month} {year}")
+    }
+}
+
+/// Removes history words (by index), to be forgotten on OK.
+fn forget_history(hwnd: HWND, mut indexes: Vec<usize>) {
+    indexes.sort_unstable_by(|a, b| b.cmp(a));
+    indexes.dedup();
+    WINDOW.with(|w| {
+        if let Some(w) = w.borrow_mut().as_mut() {
+            for i in indexes {
+                if i < w.history.len() {
+                    let entry = w.history.remove(i);
+                    w.forget.push((entry.key, entry.word));
+                }
+            }
+        }
+    });
+    refresh_history(hwnd);
+}
+
+/// "Remove" (or Delete in the list): removes the selected words.
+fn on_history_remove(hwnd: HWND) {
+    let rows = selected_rows(item(hwnd, ID_HISTORY));
+    let indexes = WINDOW.with(|w| {
+        let w = w.borrow();
+        let w = w.as_ref()?;
+        Some(
+            rows.iter()
+                .filter_map(|&r| w.history_rows.get(r).copied())
+                .collect(),
+        )
+    });
+    forget_history(hwnd, indexes.unwrap_or_default());
+}
+
+/// "Remove all…": asks, then empties the history.
+fn on_history_clear(hwnd: HWND) {
+    let total = WINDOW.with(|w| w.borrow().as_ref().map_or(0, |w| w.history.len()));
+    if total == 0 {
+        return;
+    }
+    // SAFETY: a message box owned by our window; both strings are valid.
+    let answer = unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            w!("Remove every word from your typing history?\n\n\
+                 Completions then come from the dictionary only, until you type \
+                 more. This happens when you press OK."),
+            w!("Ezhuthu settings"),
+            MB_YESNO | MB_ICONQUESTION,
+        )
+    };
+    if answer == IDYES {
+        forget_history(hwnd, (0..total).collect());
+    }
+}
+
+/// "Open file": shows history.tsv in Notepad.
+fn on_history_open(hwnd: HWND) {
+    match History::path() {
+        Ok(path) if path.exists() => {
+            let file = HSTRING::from(format!("\"{}\"", path.display()));
+            // SAFETY: plain shell open of Notepad with our own file.
+            unsafe {
+                ShellExecuteW(
+                    Some(hwnd),
+                    w!("open"),
+                    w!("notepad.exe"),
+                    &file,
+                    None,
+                    SW_SHOWNORMAL,
+                );
+            }
+        }
+        _ => warn(hwnd, "There's no typing history yet."),
+    }
+}
+
 /// Enter in the Words tab's boxes means "Save word" (or nothing, in the
-/// search box) rather than OK.
+/// search boxes) rather than OK.
 fn enter_in_words(hwnd: HWND) -> bool {
     // SAFETY: plain queries of our own controls.
     unsafe {
@@ -1296,25 +1630,26 @@ fn enter_in_words(hwnd: HWND) -> bool {
             on_word_save(hwnd);
             true
         } else {
-            id == ID_WORD_SEARCH
+            id == ID_WORD_SEARCH || id == ID_HISTORY_SEARCH
         }
     }
 }
 
 fn on_ok(hwnd: HWND) {
-    let Some((custom, convert, learned, apply)) = WINDOW.with(|w| {
+    let Some((custom, convert, learned, forget, apply)) = WINDOW.with(|w| {
         let w = w.borrow();
         let w = w.as_ref()?;
         Some((
             w.hotkey.clone(),
             w.convert.clone(),
             w.learned.clone(),
+            w.forget.clone(),
             w.apply,
         ))
     }) else {
         return;
     };
-    match read(hwnd, custom, convert, learned).and_then(|v| apply(&v)) {
+    match read(hwnd, custom, convert, learned, forget).and_then(|v| apply(&v)) {
         // SAFETY: closing our own window.
         Ok(()) => {
             let _ = unsafe { DestroyWindow(hwnd) };
@@ -1423,15 +1758,17 @@ unsafe extern "system" fn window_proc(
                 ID_WORD_SAVE => on_word_save(hwnd),
                 ID_WORD_REMOVE => on_word_remove(hwnd),
                 ID_WORD_CLEAR => on_word_clear(hwnd),
-                ID_CLEAR_HISTORY => on_clear_history(hwnd),
-                id @ (ID_WORD_SEARCH | ID_WORD_KEY)
+                ID_HISTORY_OPEN => on_history_open(hwnd),
+                ID_HISTORY_REMOVE => on_history_remove(hwnd),
+                ID_HISTORY_CLEAR => on_history_clear(hwnd),
+                id @ (ID_WORD_SEARCH | ID_WORD_KEY | ID_HISTORY_SEARCH)
                     if (wparam.0 >> 16) as u32 == EN_CHANGE
                         && !WINDOW.with(|w| w.borrow().as_ref().is_some_and(|w| w.filling)) =>
                 {
-                    if id == ID_WORD_SEARCH {
-                        refresh_words(hwnd);
-                    } else {
-                        on_word_key_changed(hwnd);
+                    match id {
+                        ID_WORD_SEARCH => refresh_words(hwnd),
+                        ID_HISTORY_SEARCH => refresh_history(hwnd),
+                        _ => on_word_key_changed(hwnd),
                     }
                 }
                 ID_CONVERT_ON => {
@@ -1462,6 +1799,15 @@ unsafe extern "system" fn window_proc(
                 if key.wVKey == VK_DELETE.0 {
                     on_word_remove(hwnd);
                 }
+            } else if hdr.idFrom == ID_HISTORY as usize && hdr.code == LVN_GETDISPINFOW {
+                // SAFETY: LVN_GETDISPINFOW comes with an NMLVDISPINFOW.
+                history_cell(unsafe { &mut *(lparam.0 as *mut NMLVDISPINFOW) });
+            } else if hdr.idFrom == ID_HISTORY as usize && hdr.code == LVN_KEYDOWN {
+                // SAFETY: LVN_KEYDOWN comes with an NMLVKEYDOWN.
+                let key = unsafe { &*(lparam.0 as *const NMLVKEYDOWN) };
+                if key.wVKey == VK_DELETE.0 {
+                    on_history_remove(hwnd);
+                }
             } else if hdr.code == NM_CLICK || hdr.code == NM_RETURN {
                 // SAFETY: only our SysLink controls send these to this window.
                 open_link(unsafe { &*(lparam.0 as *const NMLINK) });
@@ -1469,8 +1815,8 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         // Labels, radio buttons, checkbox and links take the tab page's
-        // background; notes are grey and the heart red. The key box (a
-        // read-only edit) stays white like an input.
+        // background; notes are grey, section icons blue and the heart red.
+        // The key box (a read-only edit) stays white like an input.
         WM_CTLCOLORSTATIC => {
             let dc = HDC(wparam.0 as *mut _);
             let page = WINDOW.with(|w| w.borrow().as_ref().map(|w| w.page_brush));
@@ -1479,12 +1825,16 @@ unsafe extern "system" fn window_proc(
                 SetBkMode(dc, TRANSPARENT);
                 let brush = match GetDlgCtrlID(HWND(lparam.0 as *mut _)) {
                     ID_HOTKEY | ID_CONVERT_KEY => None,
-                    ID_MUTED | ID_WORD_COUNT => {
+                    ID_MUTED | ID_WORD_COUNT | ID_HISTORY_COUNT => {
                         SetTextColor(dc, COLORREF(GetSysColor(COLOR_GRAYTEXT)));
                         page
                     }
                     ID_HEART => {
                         SetTextColor(dc, COLORREF(0x0030_30D8)); // BGR: #D83030
+                        page
+                    }
+                    ID_ICON => {
+                        SetTextColor(dc, COLORREF(GetSysColor(COLOR_HOTLIGHT)));
                         page
                     }
                     _ => page,
@@ -1503,6 +1853,8 @@ unsafe extern "system" fn window_proc(
                 unsafe {
                     let _ = DeleteObject(HGDIOBJ(w.font.0));
                     let _ = DeleteObject(HGDIOBJ(w.title_font.0));
+                    let _ = DeleteObject(HGDIOBJ(w.section_font.0));
+                    let _ = DeleteObject(HGDIOBJ(w.icon_font.0));
                     let _ = DeleteObject(HGDIOBJ(w.page_brush.0));
                     if let Some(icon) = w.logo {
                         let _ = DestroyIcon(icon);
@@ -1622,13 +1974,14 @@ mod tests {
                 pair("kadal", "கடல்"),
                 pair("thamil", "தமில்"),
             ],
+            history: Vec::new(),
+            forget: Vec::new(),
         };
         open(
             values,
             Actions {
                 apply,
                 suggest,
-                clear_history: || Ok(()),
                 on_close: closed,
             },
         );
@@ -1679,6 +2032,115 @@ mod tests {
         assert!(hwnd().is_none(), "OK closes the window");
     }
 
+    /// Shows tab `t`, as clicking it would.
+    fn select_tab(t: usize) {
+        show_page(t);
+        // SAFETY: selecting that tab on our own tab control.
+        unsafe {
+            if let Some(h) = hwnd()
+                && let Ok(tabs) = GetDlgItem(Some(h), ID_TABS)
+            {
+                SendMessageW(
+                    tabs,
+                    windows::Win32::UI::Controls::TCM_SETCURSEL,
+                    Some(WPARAM(t)),
+                    None,
+                );
+            }
+        }
+    }
+
+    fn entry(key: &str, word: &str, count: u32, last: u64) -> Entry {
+        Entry {
+            key: key.into(),
+            word: word.into(),
+            count,
+            last,
+        }
+    }
+
+    /// The History tab: the list shows the history, search filters it,
+    /// Remove and Remove all take words out, and OK hands the removed
+    /// words to the app.
+    #[test]
+    fn history_tab_removes_words() {
+        thread_local! {
+            static APPLIED: RefCell<Option<Values>> = const { RefCell::new(None) };
+        }
+        fn apply(v: &Values) -> Result<(), String> {
+            APPLIED.with(|a| *a.borrow_mut() = Some(v.clone()));
+            Ok(())
+        }
+        let values = Values {
+            hotkey: "Ctrl+Alt+T".into(),
+            convert_hotkey: String::new(),
+            insert_mode: InsertMode::Clipboard,
+            beam: 5,
+            remember_picks: true,
+            predict: true,
+            theme: Theme::System,
+            autostart: false,
+            learned: Vec::new(),
+            history: vec![
+                entry("vanakkam", "வணக்கம்", 3, 30),
+                entry("endru", "என்று", 2, 20),
+                entry("nandri", "நன்றி", 1, 10),
+            ],
+            forget: Vec::new(),
+        };
+        open(
+            values,
+            Actions {
+                apply,
+                suggest: |_| Vec::new(),
+                on_close: || {},
+            },
+        );
+        let h = hwnd().expect("settings window");
+        let text = |id| text_of(item(h, id));
+        assert_eq!(text(ID_HISTORY_COUNT), "3 words");
+
+        // Search, then remove the one word shown.
+        fill_text(item(h, ID_HISTORY_SEARCH), "endr");
+        refresh_history(h);
+        assert_eq!(text(ID_HISTORY_COUNT), "1 of 3");
+        select_row(item(h, ID_HISTORY), Some(0));
+        assert_eq!(selected_rows(item(h, ID_HISTORY)), [0]);
+        on_history_remove(h);
+        assert_eq!(text(ID_HISTORY_COUNT), "0 of 2");
+
+        // Delete in the list removes too.
+        fill_text(item(h, ID_HISTORY_SEARCH), "");
+        refresh_history(h);
+        select_row(item(h, ID_HISTORY), Some(1));
+        on_history_remove(h);
+        assert_eq!(text(ID_HISTORY_COUNT), "1 word");
+
+        on_ok(h);
+        let applied = APPLIED.with(|a| a.borrow_mut().take()).expect("applied");
+        let pair = |k: &str, w: &str| (k.to_string(), w.to_string());
+        assert_eq!(
+            applied.forget,
+            [pair("endru", "என்று"), pair("nandri", "நன்றி")]
+        );
+        assert_eq!(applied.insert_mode, InsertMode::Clipboard);
+        assert!(hwnd().is_none(), "OK closes the window");
+    }
+
+    #[test]
+    fn labels_days_relative_to_today() {
+        let today = (2026, 10, 27);
+        let yesterday = (2026, 10, 26);
+        assert_eq!(day_label(today, today, yesterday), "Today");
+        assert_eq!(day_label(yesterday, today, yesterday), "Yesterday");
+        assert_eq!(day_label((2026, 3, 5), today, yesterday), "5 Mar");
+        assert_eq!(day_label((2025, 12, 31), today, yesterday), "31 Dec 2025");
+        // 2023-11-14 22:13 UTC: the 14th or 15th, depending on the time zone.
+        let (y, m, d) = local_day(1_700_000_000).unwrap();
+        assert_eq!((y, m), (2023, 11));
+        assert!(d == 14 || d == 15);
+    }
+
     #[test]
     fn recognises_presets_however_written() {
         assert_eq!(preset_index("Ctrl+Alt+T"), Some(0));
@@ -1687,9 +2149,87 @@ mod tests {
         assert_eq!(preset_index("Ctrl+Alt+K"), None);
     }
 
+    /// Saves each tab of the open window as target/settings-<n>.bmp, then
+    /// closes it.
+    fn save_tabs() {
+        use windows::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDIBits,
+        };
+        use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+        use windows::Win32::UI::WindowsAndMessaging::{PM_REMOVE, PeekMessageW};
+        let h = hwnd().expect("settings window");
+        for t in 0..5 {
+            select_tab(t);
+            // SAFETY: draining our thread's messages so the tab paints, then
+            // drawing the window into a bitmap that is read back within its
+            // size and freed, with every selection restored.
+            unsafe {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                let mut r = RECT::default();
+                let _ = GetClientRect(h, &mut r);
+                let (w, ht) = (r.right, r.bottom);
+                let screen = GetDC(Some(h));
+                let dc = CreateCompatibleDC(Some(screen));
+                let bmp = CreateCompatibleBitmap(screen, w, ht);
+                let old = SelectObject(dc, HGDIOBJ(bmp.0));
+                // PW_CLIENTONLY | PW_RENDERFULLCONTENT
+                let _ = PrintWindow(h, dc, PRINT_WINDOW_FLAGS(1 | 2));
+                SelectObject(dc, old);
+                let mut info = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w,
+                        biHeight: ht,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let mut px = vec![0u8; (w * ht * 4) as usize];
+                GetDIBits(
+                    dc,
+                    bmp,
+                    0,
+                    ht as u32,
+                    Some(px.as_mut_ptr() as *mut _),
+                    &mut info,
+                    DIB_RGB_COLORS,
+                );
+                let _ = DeleteObject(HGDIOBJ(bmp.0));
+                let _ = DeleteDC(dc);
+                ReleaseDC(Some(h), screen);
+                let mut file = Vec::new();
+                file.extend(b"BM");
+                file.extend((54 + px.len() as u32).to_le_bytes());
+                file.extend([0u8; 4]);
+                file.extend(54u32.to_le_bytes());
+                file.extend(40u32.to_le_bytes());
+                file.extend(w.to_le_bytes());
+                file.extend(ht.to_le_bytes());
+                file.extend(1u16.to_le_bytes());
+                file.extend(32u16.to_le_bytes());
+                file.extend([0u8; 24]);
+                file.extend(&px);
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("../../target/settings-{t}.bmp"));
+                std::fs::write(path, file).unwrap();
+            }
+        }
+        // SAFETY: closing our own window.
+        let _ = unsafe { DestroyWindow(h) };
+    }
+
     /// Opens the window for a few seconds (for screenshots); Cancel or the
     /// timeout closes it. Run with: cargo test -p ezhuthu settings_preview -- --ignored
-    /// (EZHUTHU_PREVIEW_TAB=1 starts on the Shortcuts tab, 2 on Words, 3 on About.)
+    /// (EZHUTHU_PREVIEW_TAB=1 starts on the Shortcuts tab, 2 on Words, 3 on History,
+    /// 4 on About; with EZHUTHU_PREVIEW_SAVE set, it saves every tab as
+    /// target/settings-<n>.bmp and closes.)
     #[test]
     #[ignore]
     fn settings_preview() {
@@ -1714,6 +2254,12 @@ mod tests {
                 ("kadal".into(), "கடல்".into()),
                 ("thamil".into(), "தமில்".into()),
             ],
+            history: vec![
+                entry("vanakkam", "வணக்கம்", 42, history::now()),
+                entry("endru", "என்று", 31, history::now() - 86_400),
+                entry("nandri", "நன்றி", 9, 1_700_000_000),
+            ],
+            forget: Vec::new(),
         };
         fn suggest(_: &str) -> Vec<String> {
             vec!["கடல்".into(), "காதல்".into()]
@@ -1723,29 +2269,19 @@ mod tests {
             Actions {
                 apply,
                 suggest,
-                clear_history: || Ok(()),
                 on_close: closed,
             },
         );
+        if std::env::var_os("EZHUTHU_PREVIEW_SAVE").is_some() {
+            save_tabs();
+            return;
+        }
         let start_tab = std::env::var("EZHUTHU_PREVIEW_TAB")
             .ok()
             .and_then(|t| t.parse::<usize>().ok())
-            .filter(|&t| (1..=3).contains(&t));
+            .filter(|&t| (1..=4).contains(&t));
         if let Some(t) = start_tab {
-            show_page(t);
-            // SAFETY: selecting the About tab on our own tab control.
-            unsafe {
-                if let Some(h) = hwnd()
-                    && let Ok(tabs) = GetDlgItem(Some(h), ID_TABS)
-                {
-                    SendMessageW(
-                        tabs,
-                        windows::Win32::UI::Controls::TCM_SETCURSEL,
-                        Some(WPARAM(t)),
-                        None,
-                    );
-                }
-            }
+            select_tab(t);
         }
         // SAFETY: a plain message loop with a timer that closes the window.
         unsafe {
