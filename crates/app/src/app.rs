@@ -1148,6 +1148,17 @@ impl App {
         true
     }
 
+    /// The row showing the current word's learned pick (never the English
+    /// row, the last one), if picks are remembered.
+    fn learned_row(&self, options: &[String]) -> Option<usize> {
+        if !self.config.remember_picks {
+            return None;
+        }
+        let word = self.learned.get(&self.composer.key()?)?;
+        let tamil = &options[..options.len().saturating_sub(1)];
+        tamil.iter().position(|o| o == word)
+    }
+
     fn view(&self) -> View {
         let candidates = self.shown();
         let (hint, warn) = if let Some(f) = &self.flash {
@@ -1165,6 +1176,7 @@ impl App {
             cursor: self.composer.cursor(),
             preview: self.composer.render(Some(&candidates)),
             english: candidates.len().checked_sub(1),
+            learned: self.learned_row(&candidates),
             candidates,
             selected: self.composer.selected(),
             hint,
