@@ -35,18 +35,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, ToUnicodeEx, UnregisterHotKey, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE,
     VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_MENU, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT,
-    VK_SPACE, VK_UP,
+    VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HHOOK,
     HWND_TOPMOST, IsDialogMessageW, KBDLLHOOKSTRUCT, KillTimer, LLKHF_EXTENDED, MA_NOACTIVATE, MSG,
     PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos, SetWindowsHookExW, ShowWindow,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE,
-    WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WM_TIMER, WM_USER, WNDCLASSEXW,
+    SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetTimer, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT,
+    WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_PAINT, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_TIMER, WM_USER, WNDCLASSEXW,
 };
 use windows::core::w;
 
@@ -55,8 +55,9 @@ use crate::caret;
 use crate::compose::Composer;
 use crate::config::{Config, InsertMode};
 use crate::convert;
-use crate::engine::{Engine, Event};
+use crate::engine::{COMPLETE_FROM, Engine, Event, suggest};
 use crate::focus;
+use crate::history::History;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::insert::{self, Out, SavedClipboard};
 use crate::learned::Learned;
@@ -118,6 +119,8 @@ struct App {
     xlit: Option<Arc<Transliterator>>,
     status: Status,
     cache: HashMap<String, Vec<String>>,
+    /// Dictionary completions per word (cleared with `cache`).
+    completions: HashMap<String, Option<String>>,
     pending: HashSet<String>,
     /// The word (cache key) whose candidates the popup shows; see `shown`.
     shown_key: Option<String>,
@@ -125,12 +128,20 @@ struct App {
     learned: Learned,
     learned_path: Option<PathBuf>,
     learned_dirty: bool,
+    /// Words inserted, for predictions, and their file (None: not saved).
+    history: History,
+    history_path: Option<PathBuf>,
+    history_dirty: bool,
     /// Tamil mode: the keyboard hook is installed.
     on: bool,
     kb_hook: Option<HHOOK>,
     fg_hook: Option<HWINEVENTHOOK>,
     composer: Composer,
     visible: bool,
+    /// Where the popup was placed (its caret) and its current size, so it can
+    /// grow or shrink with the list.
+    anchor: Option<caret::Anchor>,
+    popup_size: (i32, i32),
     /// Keys whose key-down we swallowed; their key-up is swallowed too.
     swallowed: HashSet<u16>,
     /// Output waiting to be injected, in order.
@@ -162,6 +173,44 @@ fn process_of(hwnd: HWND) -> u32 {
     // SAFETY: plain query.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     pid
+}
+
+/// The popup's list: `tamil` suggestions, then the word as typed (English).
+#[derive(Debug, Default)]
+struct Options {
+    words: Vec<String>,
+    tamil: usize,
+    /// When the first row is the completion's: the whole word, and the text
+    /// it is shown going on from (the row, or the first suggestion when the
+    /// word was put in as a row of its own).
+    completion: Option<(String, String)>,
+}
+
+/// The whole word the current letters may complete to (shown dimmed after
+/// them; Tab inserts it).
+#[derive(Debug, Clone, PartialEq)]
+struct Completion {
+    word: String,
+    /// The letters once typed for it (from the typing history), if known;
+    /// dictionary completions have none.
+    letters: Option<String>,
+}
+
+impl Options {
+    fn len(&self) -> usize {
+        self.words.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+}
+
+/// Whether `word` goes on from the suggestion `row` (starts with it, a final
+/// pulli dropped, and is longer).
+fn goes_on_from(word: &str, row: &str) -> bool {
+    let stem = row.strip_suffix('\u{0BCD}').unwrap_or(row);
+    word.len() > stem.len() && word.starts_with(stem)
 }
 
 /// A convert selection in progress, in `target` (the window it started in;
@@ -231,6 +280,17 @@ pub fn run() -> Result<()> {
     };
     let learned_path = learned_path.filter(|_| learned.is_some());
     let learned = learned.unwrap_or_default();
+    let history_path = History::path().ok();
+    let history = match history_path.as_deref().map(History::load) {
+        Some(Ok(h)) => Some(h),
+        Some(Err(e)) => {
+            eprintln!("typing history not loaded: {e:#}");
+            None
+        }
+        None => None,
+    };
+    let history_path = history_path.filter(|_| history.is_some());
+    let history = history.unwrap_or_default();
 
     focus::start();
     let engine = Engine::start(config.assets_dir(), config.beam, main, WM_APP_ENGINE);
@@ -245,16 +305,22 @@ pub fn run() -> Result<()> {
         xlit: None,
         status: Status::Loading,
         cache: HashMap::new(),
+        completions: HashMap::new(),
         pending: HashSet::new(),
         shown_key: None,
         learned,
         learned_path,
         learned_dirty: false,
+        history,
+        history_path,
+        history_dirty: false,
         on: false,
         kb_hook: None,
         fg_hook: None,
         composer: Composer::default(),
         visible: false,
+        anchor: None,
+        popup_size: (0, 0),
         swallowed: HashSet::new(),
         outbox: Vec::new(),
         flush_posted: false,
@@ -727,6 +793,7 @@ impl App {
             self.swallowed.clear();
             // Forget what was typed this session.
             self.cache.clear();
+            self.completions.clear();
         }
         let tip = tooltip(&self.config, self.on);
         self.tray.set_state(self.on, &tip);
@@ -740,6 +807,7 @@ impl App {
         self.xlit = None;
         self.status = Status::Loading;
         self.cache.clear();
+        self.completions.clear();
         self.pending.clear();
         self.popup.set_rows(popup_rows(beam));
         self.cancel_convert(None);
@@ -747,14 +815,14 @@ impl App {
 
     /// The popup's options once the word's Tamil candidates are known: those
     /// that fit, then the word as typed, for English without leaving Tamil mode.
-    fn candidates(&self) -> Vec<String> {
+    fn candidates(&self) -> Options {
         self.options(self.composer.key().as_deref())
     }
 
     /// What the popup shows: the current options, or until they arrive the
     /// last ones shown for this word, so the rows don't blank out (flicker)
     /// on every letter.
-    fn shown(&self) -> Vec<String> {
+    fn shown(&self) -> Options {
         match self.candidates() {
             list if list.is_empty() => self.options(self.shown_key.as_deref()),
             list => list,
@@ -762,22 +830,48 @@ impl App {
     }
 
     /// The Tamil candidates of `key` that fit, then the current word as typed.
-    fn options(&self, key: Option<&str>) -> Vec<String> {
+    /// With a completion, the suggestion it goes on from comes first (or
+    /// the completed word itself, when none does).
+    fn options(&self, key: Option<&str>) -> Options {
         let (Some(key), Some(tamil)) = (key, key.and_then(|k| self.cache.get(k))) else {
-            return Vec::new();
+            return Options::default();
         };
-        let mut list = tamil.clone();
+        let mut words = tamil.clone();
         if self.config.remember_picks {
-            self.learned.apply(key, &mut list);
+            self.learned.apply(key, &mut words);
         }
-        list.truncate(self.rows() - 1);
-        list.push(self.composer.core().to_string());
-        list
+        let mut completion = None;
+        if self.composer.key().as_deref() == Some(key)
+            && let Some(c) = self.completion()
+        {
+            let shown = match words.iter().position(|row| goes_on_from(&c.word, row)) {
+                Some(i) => {
+                    let row = words.remove(i);
+                    words.insert(0, row.clone());
+                    row
+                }
+                None => {
+                    let first = words.first().cloned().unwrap_or_default();
+                    words.insert(0, c.word.clone());
+                    first
+                }
+            };
+            completion = Some((c.word, shown));
+        }
+        words.truncate(self.tamil_rows());
+        let tamil = words.len();
+        words.push(self.composer.core().to_string());
+        Options {
+            words,
+            tamil,
+            completion,
+        }
     }
 
-    /// Remembers a Tamil pick for the current word (not the English row),
-    /// and saves soon after if that changed anything.
-    fn learn(&mut self, options: &[String]) {
+    /// Records the word being inserted: a Tamil pick (not the English row)
+    /// may be learned, and goes into the typing history (for completions);
+    /// both are saved soon after.
+    fn learn(&mut self, options: &Options) {
         let selected = self.composer.selected();
         let chosen = if selected < options.len() {
             selected
@@ -787,30 +881,44 @@ impl App {
         let Some(key) = self.composer.key() else {
             return;
         };
-        if !self.config.remember_picks || chosen + 1 >= options.len() {
+        let Some(word) = options.words.get(chosen) else {
             return;
+        };
+        let mut changed = false;
+        if self.config.remember_picks && chosen < options.tamil {
+            let model_top = self.cache.get(&key).and_then(|c| c.first());
+            if self
+                .learned
+                .record(&key, word, model_top.map(String::as_str))
+            {
+                self.learned_dirty = true;
+                changed = true;
+            }
         }
-        let model_top = self.cache.get(&key).and_then(|c| c.first());
-        if self
-            .learned
-            .record(&key, &options[chosen], model_top.map(String::as_str))
-            && !self.learned_dirty
-        {
-            self.learned_dirty = true;
+        if self.config.predict && chosen < options.tamil {
+            self.history.record(&key, word);
+            self.history_dirty = true;
+            changed = true;
+        }
+        if changed {
             post(self.main, WM_APP_SAVE_LEARNED);
         }
     }
 
-    /// Writes the learned words if they changed (posted, so the file write
-    /// never happens inside the keyboard hook).
+    /// Writes the learned words and the typing history if they changed
+    /// (posted, so the file writes never happen inside the keyboard hook).
     fn save_learned(&mut self) {
-        if !std::mem::take(&mut self.learned_dirty) {
-            return;
-        }
-        if let Some(path) = &self.learned_path
+        if std::mem::take(&mut self.learned_dirty)
+            && let Some(path) = &self.learned_path
             && let Err(e) = self.learned.save(path)
         {
             eprintln!("learned words not saved: {e:#}");
+        }
+        if std::mem::take(&mut self.history_dirty)
+            && let Some(path) = &self.history_path
+            && let Err(e) = self.history.save(path)
+        {
+            eprintln!("typing history not saved: {e:#}");
         }
     }
 
@@ -829,16 +937,54 @@ impl App {
         if let (Some(key), Some(xlit)) = (self.composer.key(), &self.xlit)
             && !self.cache.contains_key(&key)
         {
-            let cands = xlit
-                .transliterate(&key)
-                .map(|c| c.into_iter().map(|c| c.text).collect())
-                .unwrap_or_default();
+            let (cands, completion) = suggest(xlit, &key);
+            self.completions.insert(key.clone(), completion);
             self.cache.insert(key, cands);
         }
     }
 
-    fn rows(&self) -> usize {
-        self.popup.rows()
+    /// The whole word the letters typed may complete to (from `COMPLETE_FROM`
+    /// letters on): the best word typed before for them, else a confident
+    /// guess from the dictionary.
+    fn completion(&self) -> Option<Completion> {
+        if !self.config.predict {
+            return None;
+        }
+        let key = self.composer.key()?;
+        if key.len() < COMPLETE_FROM {
+            return None;
+        }
+        if let Some((letters, word)) = self.history.complete(&key) {
+            return Some(Completion {
+                word: word.to_string(),
+                letters: Some(letters.to_string()),
+            });
+        }
+        let word = self.completions.get(&key)?.clone()?;
+        Some(Completion {
+            word,
+            letters: None,
+        })
+    }
+
+    /// Inserts the completion plus `suffix` (Tab, or picking the first row,
+    /// which shows it), and remembers it.
+    fn complete_word(&mut self, suffix: &str) {
+        let (Some(completion), Some(key)) = (self.completion(), self.composer.key()) else {
+            return;
+        };
+        let letters = completion.letters.as_deref().unwrap_or(&key);
+        self.history.record(letters, &completion.word);
+        self.history_dirty = true;
+        post(self.main, WM_APP_SAVE_LEARNED);
+        let text = self.composer.render_word(&completion.word) + suffix;
+        self.discard();
+        self.emit(Out::Text(text));
+    }
+
+    /// Tamil suggestions shown per word (the beam, up to `MAX_ROWS`).
+    fn tamil_rows(&self) -> usize {
+        self.config.beam.min(MAX_ROWS)
     }
 
     /// Requests the current word from the engine unless cached or pending.
@@ -876,8 +1022,11 @@ impl App {
         // Read each time, so a change to Windows' light/dark mode shows at once.
         self.popup.set_dark(self.config.theme.is_dark());
         self.popup.set_dpi(caret::dpi_at(anchor));
+        self.popup.set_list(self.tamil_rows() + 1);
         let (w, h) = self.popup.size();
         let (x, y) = caret::place(anchor, w, h, self.popup.gap());
+        self.anchor = Some(anchor);
+        self.popup_size = (w, h);
         self.visible = true;
         // SAFETY: our own window; SWP_NOACTIVATE keeps focus in the app.
         unsafe {
@@ -902,10 +1051,44 @@ impl App {
         }
     }
 
-    fn invalidate(&self) {
+    fn invalidate(&mut self) {
         if self.visible {
+            self.fit_popup();
             // SAFETY: our own window; painting happens later via WM_PAINT.
             let _ = unsafe { InvalidateRect(Some(self.popup.hwnd), None, false) };
+        }
+    }
+
+    /// Grows or shrinks the popup to the list (predictions come and go),
+    /// placed again by its caret so it stays on screen.
+    fn fit_popup(&mut self) {
+        let list = self.shown();
+        let rows = if list.is_empty() {
+            self.tamil_rows() + 1
+        } else {
+            list.len()
+        };
+        self.popup.set_list(rows);
+        let (w, h) = self.popup.size();
+        let Some(anchor) = self.anchor else {
+            return;
+        };
+        if (w, h) == self.popup_size {
+            return;
+        }
+        self.popup_size = (w, h);
+        let (x, y) = caret::place(anchor, w, h, self.popup.gap());
+        // SAFETY: our own window; SWP_NOACTIVATE keeps focus in the app.
+        unsafe {
+            let _ = SetWindowPos(
+                self.popup.hwnd,
+                None,
+                x,
+                y,
+                w,
+                h,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
         }
     }
 
@@ -946,8 +1129,13 @@ impl App {
         }
         self.ensure_candidates();
         let options = self.candidates();
+        // The first row shows the completed word: that is what goes in.
+        if options.completion.is_some() && self.composer.selected() == 0 {
+            self.complete_word(suffix);
+            return;
+        }
         self.learn(&options);
-        let text = self.composer.render(Some(&options)) + suffix;
+        let text = self.composer.render(Some(&options.words)) + suffix;
         self.discard();
         self.emit(Out::Text(text));
     }
@@ -1111,6 +1299,11 @@ impl App {
                 self.composer.cursor_to(v == VK_END.0);
                 self.invalidate();
             }
+            // Tab inserts the completion (when there is one; else it's just
+            // another key, below).
+            v if v == VK_TAB.0 && composing && self.completion().is_some() => {
+                self.complete_word(" ");
+            }
             v if v == VK_DELETE.0 && composing => {
                 self.composer.delete();
                 self.after_edit();
@@ -1148,19 +1341,36 @@ impl App {
         true
     }
 
-    /// The row showing the current word's learned pick (never the English
-    /// row, the last one), if picks are remembered.
-    fn learned_row(&self, options: &[String]) -> Option<usize> {
+    /// The row showing the current word's learned pick (among the Tamil
+    /// suggestions), if picks are remembered.
+    fn learned_row(&self, options: &Options) -> Option<usize> {
         if !self.config.remember_picks {
             return None;
         }
         let word = self.learned.get(&self.composer.key()?)?;
-        let tamil = &options[..options.len().saturating_sub(1)];
-        tamil.iter().position(|o| o == word)
+        options.words[..options.tamil]
+            .iter()
+            .position(|o| o == word)
+    }
+
+    /// The rest of the letters once typed for `c`, to show dimmed after the
+    /// caret: only when the caret is at the end of the word.
+    fn ghost_letters(&self, c: &Completion) -> String {
+        let (Some(letters), Some(key)) = (&c.letters, self.composer.key()) else {
+            return String::new();
+        };
+        let text = self.composer.text();
+        let at_end = self.composer.cursor() == text.chars().count();
+        if at_end && text.ends_with(self.composer.core()) && letters.starts_with(&key) {
+            letters[key.len()..].to_string()
+        } else {
+            String::new()
+        }
     }
 
     fn view(&self) -> View {
         let candidates = self.shown();
+        let completion = self.completion();
         let (hint, warn) = if let Some(f) = &self.flash {
             (f.clone(), true)
         } else {
@@ -1174,10 +1384,19 @@ impl App {
         View {
             input: self.composer.text().to_string(),
             cursor: self.composer.cursor(),
-            preview: self.composer.render(Some(&candidates)),
+            preview: self.composer.render(Some(&candidates.words)),
             english: candidates.len().checked_sub(1),
             learned: self.learned_row(&candidates),
-            candidates,
+            ghost: completion
+                .as_ref()
+                .map(|c| self.ghost_letters(c))
+                .unwrap_or_default(),
+            completion: candidates
+                .completion
+                .clone()
+                .map(|(word, shown)| (0, word, shown)),
+            can_complete: completion.is_some(),
+            candidates: candidates.words,
             selected: self.composer.selected(),
             hint,
             warn,
@@ -1260,12 +1479,18 @@ fn on_engine_events() {
                     a.cancel_convert(None);
                     failed = Some(e);
                 }
-                Event::Done { key, candidates } => {
+                Event::Done {
+                    key,
+                    candidates,
+                    completion,
+                } => {
                     a.pending.remove(&key);
                     // Bounded: typed words should not pile up in memory.
                     if a.cache.len() >= MAX_CACHE {
                         a.cache.clear();
+                        a.completions.clear();
                     }
+                    a.completions.insert(key.clone(), completion);
                     a.cache.insert(key, candidates);
                 }
             }
@@ -1343,6 +1568,7 @@ fn open_settings() {
     let actions = settings::Actions {
         apply: apply_settings,
         suggest: suggest_words,
+        clear_history,
         on_close: settings_closed,
     };
     settings::open(current_values(), actions);
@@ -1358,10 +1584,27 @@ fn current_values() -> settings::Values {
         insert_mode: config.insert_mode,
         beam: config.beam,
         remember_picks: config.remember_picks,
+        predict: config.predict,
         theme: config.theme,
         autostart,
         learned,
     }
+}
+
+/// Settings "Clear typing history…": forgets it and deletes the file.
+fn clear_history() -> Result<(), String> {
+    let result = with_app(|a| {
+        a.history.clear();
+        a.history_dirty = false;
+        match &a.history_path {
+            Some(path) => a
+                .history
+                .save(path)
+                .map_err(|e| format!("Couldn't delete the typing history: {e:#}")),
+            None => Ok(()),
+        }
+    });
+    result.unwrap_or_else(|| Err("Ezhuthu is busy; try again".into()))
 }
 
 /// The model's suggestions for `key` (Settings > Words); none until it loads.
@@ -1447,6 +1690,7 @@ fn apply_settings(v: &settings::Values) -> Result<(), String> {
         new.insert_mode = v.insert_mode;
         new.beam = v.beam;
         new.remember_picks = v.remember_picks;
+        new.predict = v.predict;
         new.theme = v.theme;
         new.save(&a.config_path)
             .map_err(|e| format!("Couldn't save the settings: {e:#}"))?;

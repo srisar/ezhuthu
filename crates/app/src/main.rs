@@ -15,6 +15,7 @@ mod config;
 mod convert;
 mod engine;
 mod focus;
+mod history;
 mod hotkey;
 mod insert;
 mod learned;

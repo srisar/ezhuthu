@@ -142,6 +142,13 @@ impl Composer {
         }
     }
 
+    /// The word with `word` in place of its letters, keeping the punctuation
+    /// around them.
+    pub fn render_word(&self, word: &str) -> String {
+        let parts = split_word(&self.text);
+        format!("{}{word}{}", parts.prefix, parts.suffix)
+    }
+
     /// The word in Tamil with the selected candidate, or as typed while the
     /// candidates are unknown.
     pub fn render(&self, candidates: Option<&[String]>) -> String {

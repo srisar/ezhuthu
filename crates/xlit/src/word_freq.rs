@@ -86,6 +86,96 @@ impl WordProb for WordFreq {
     }
 }
 
+impl WordFreq {
+    /// The most frequent words that start with `prefix` and are longer than
+    /// it, most frequent first: up to `limit` of them, from at most
+    /// `MAX_SCAN` words starting with the prefix (in dictionary order).
+    pub fn completions(&self, prefix: &str, limit: usize) -> Vec<(String, f32)> {
+        const MAX_SCAN: usize = 200_000;
+        let Some(key) = encode_word(prefix) else {
+            return Vec::new();
+        };
+        if key.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        // First record not less than the prefix.
+        let (mut lo, mut hi) = (0, self.count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.record(mid).0 < key.as_slice() {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let mut best: Vec<(f32, usize)> = Vec::with_capacity(limit + 1);
+        for i in (lo..self.count).take(MAX_SCAN) {
+            let (word, p) = self.record(i);
+            if !word.starts_with(&key) {
+                break;
+            }
+            if word.len() == key.len() {
+                continue;
+            }
+            if best.len() < limit || p > best[best.len() - 1].0 {
+                let at = best.partition_point(|&(q, _)| q >= p);
+                best.insert(at, (p, i));
+                best.truncate(limit);
+            }
+        }
+        best.into_iter()
+            .map(|(p, i)| (decode_word(self.record(i).0), p))
+            .collect()
+    }
+
+    /// The most frequent word longer than `prefix` that starts with it, and
+    /// its share of all the words starting with `prefix` (the prefix itself
+    /// included, when it is a word): how sure a completion it is, 0–1.
+    pub fn best_completion(&self, prefix: &str) -> Option<(String, f32)> {
+        const MAX_SCAN: usize = 200_000;
+        let key = encode_word(prefix)?;
+        if key.is_empty() {
+            return None;
+        }
+        let (mut lo, mut hi) = (0, self.count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.record(mid).0 < key.as_slice() {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let (mut total, mut best) = (0.0f32, None::<(f32, usize)>);
+        for i in (lo..self.count).take(MAX_SCAN) {
+            let (word, p) = self.record(i);
+            if !word.starts_with(&key) {
+                break;
+            }
+            total += p;
+            if word.len() > key.len() && best.is_none_or(|(q, _)| p > q) {
+                best = Some((p, i));
+            }
+        }
+        let (p, i) = best?;
+        Some((decode_word(self.record(i).0), p / total))
+    }
+}
+
+/// The inverse of `encode_word`.
+fn decode_word(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| {
+            if b < 0x80 {
+                b as char
+            } else {
+                char::from_u32(0x0B80 + (b as u32 - 0x80)).unwrap_or(char::REPLACEMENT_CHARACTER)
+            }
+        })
+        .collect()
+}
+
 /// One byte per character: the Tamil block U+0B80..U+0BFF maps to
 /// 0x80 + offset, ASCII stays; anything else can't be in the file.
 fn encode_word(word: &str) -> Option<Vec<u8>> {
@@ -138,6 +228,43 @@ mod tests {
         assert_eq!(wf.prob("கடல்"), Some(0.125));
         assert_eq!(wf.prob("கடால்"), None);
         assert_eq!(wf.prob("नमस्ते"), None); // outside the Tamil block
+    }
+
+    #[test]
+    fn completes_prefixes_by_frequency() {
+        let wf = WordFreq::from_bytes(build(&[
+            ("நட", 0.9),
+            ("நடனம்", 0.2),
+            ("நடந்தது", 0.4),
+            ("நடை", 0.3),
+            ("நம்", 0.8),
+        ]))
+        .unwrap();
+        let words: Vec<String> = wf
+            .completions("நட", 2)
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect();
+        assert_eq!(
+            words,
+            ["நடந்தது", "நடை"],
+            "longer words only, most frequent first"
+        );
+        assert!(wf.completions("கட", 3).is_empty());
+        // நடந்தது has 0.4 of the 1.8 total under நட (நட itself counts)
+        let (word, share) = wf.best_completion("நட").unwrap();
+        assert_eq!(word, "நடந்தது");
+        assert!((share - 0.4 / 1.8).abs() < 1e-6);
+        assert_eq!(
+            wf.best_completion("நடன").unwrap().1,
+            1.0,
+            "the only word under நடன"
+        );
+        assert!(wf.best_completion("கட").is_none());
+        assert!(
+            wf.completions("नम", 3).is_empty(),
+            "outside the Tamil block"
+        );
     }
 
     #[test]
