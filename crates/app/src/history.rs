@@ -105,25 +105,15 @@ impl History {
         used.last = at;
     }
 
-    /// Words once inserted for letters starting with `typed`, best first
-    /// (most used, then most recent), leaving out `skip`; up to `limit`.
-    pub fn predict(&self, typed: &str, skip: &[String], limit: usize) -> Vec<String> {
-        let mut found: HashMap<&str, &Use> = HashMap::new();
-        for ((key, word), used) in &self.words {
-            if key.starts_with(typed) && !skip.contains(word) {
-                let best = found.entry(word).or_insert(used);
-                if (used.count, used.last) > (best.count, best.last) {
-                    *best = used;
-                }
-            }
-        }
-        let mut ranked: Vec<(&str, &Use)> = found.into_iter().collect();
-        ranked.sort_by_key(|(_, u)| std::cmp::Reverse((u.count, u.last)));
-        ranked
-            .into_iter()
-            .take(limit)
-            .map(|(w, _)| w.to_string())
-            .collect()
+    /// The word to complete `typed` to: the best word once inserted for
+    /// letters that start with `typed` and go on past it (most used, then
+    /// most recent), as (those letters, the word).
+    pub fn complete(&self, typed: &str) -> Option<(&str, &str)> {
+        self.words
+            .iter()
+            .filter(|((key, _), _)| key.len() > typed.len() && key.starts_with(typed))
+            .max_by_key(|(_, used)| (used.count, used.last))
+            .map(|((key, word), _)| (key.as_str(), word.as_str()))
     }
 
     pub fn clear(&mut self) {
@@ -165,17 +155,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn predicts_words_typed_before_most_used_first() {
+    fn completes_to_words_typed_before_most_used_first() {
         let mut h = History::default();
         h.record_at("natchathiram", "நட்சத்திரம்", 10);
         h.record_at("natpu", "நட்பு", 20);
         h.record_at("natpu", "நட்பு", 30);
         h.record_at("amma", "அம்மா", 40);
-        assert_eq!(h.predict("nat", &[], 3), ["நட்பு", "நட்சத்திரம்"]);
-        assert_eq!(h.predict("natc", &[], 3), ["நட்சத்திரம்"]);
-        // the exact letters count too, and words already shown are skipped
-        assert_eq!(h.predict("amma", &[], 3), ["அம்மா"]);
-        assert!(h.predict("amm", &["அம்மா".to_string()], 3).is_empty());
+        assert_eq!(h.complete("nat"), Some(("natpu", "நட்பு")));
+        assert_eq!(h.complete("natc"), Some(("natchathiram", "நட்சத்திரம்")));
+        // only words that go on past the letters typed
+        assert_eq!(h.complete("amma"), None);
+        assert_eq!(h.complete("xyz"), None);
     }
 
     #[test]
@@ -199,7 +189,7 @@ mod tests {
         h.record_at("kadal", "கடல்", 99);
         assert_eq!(h.len(), MAX_WORDS);
         assert!(!h.words.contains_key(&("k7".to_string(), "அ7".to_string())));
-        assert_eq!(h.predict("kad", &[], 1), ["கடல்"]);
+        assert_eq!(h.complete("kad"), Some(("kadal", "கடல்")));
     }
 
     #[test]

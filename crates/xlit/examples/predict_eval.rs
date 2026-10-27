@@ -13,6 +13,9 @@ use ezhuthu_xlit::Transliterator;
 
 /// Predictions shown in the popup.
 const SHOWN: usize = 3;
+/// A dictionary completion is shown only when it makes up this share of the
+/// words starting the same way (as in the app).
+const MIN_SHARE: f32 = 0.5;
 /// Prefix lengths reported.
 const LENGTHS: [usize; 6] = [3, 4, 5, 6, 7, 8];
 
@@ -45,6 +48,9 @@ fn main() -> Result<()> {
     let mut predict_time = Duration::ZERO;
     let mut predict_calls = 0u32;
     let mut misses = Vec::new();
+    // The single confident completion (what the popup shows): how often one
+    // is offered from 3 letters on, and how often it is the right word.
+    let (mut prefixes, mut offered, mut right) = (0usize, 0usize, 0usize);
     for word in &words {
         let Some(target) = xlit.transliterate(word)?.into_iter().next().map(|c| c.text) else {
             continue;
@@ -55,6 +61,11 @@ fn main() -> Result<()> {
             let cands = xlit.transliterate(prefix)?;
             let start = Instant::now();
             let predicted = xlit.predict(&cands, SHOWN);
+            prefixes += 1;
+            if let Some(word) = xlit.complete(&cands, MIN_SHARE) {
+                offered += 1;
+                right += (word == target) as usize;
+            }
             predict_time += start.elapsed();
             predict_calls += 1;
             // Typing on would also show the target among the candidates.
@@ -103,6 +114,12 @@ fn main() -> Result<()> {
     println!(
         "prediction time: {:.2} ms on average ({predict_calls} calls, dictionary lookups only)",
         predict_time.as_secs_f64() * 1000.0 / predict_calls.max(1) as f64
+    );
+    println!(
+        "
+confident completion (share >= {MIN_SHARE}): offered at {offered} of {prefixes} prefixes ({:.0} %), right {right} times ({:.0} % of those offered)",
+        100.0 * offered as f64 / prefixes.max(1) as f64,
+        100.0 * right as f64 / offered.max(1) as f64
     );
     if !misses.is_empty() {
         println!("\nnever predicted ({}):", misses.len());

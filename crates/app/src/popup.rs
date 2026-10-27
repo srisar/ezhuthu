@@ -42,8 +42,13 @@ pub struct View {
     pub english: Option<usize>,
     /// The row holding a learned pick (marked with a sparkle), if any.
     pub learned: Option<usize>,
-    /// Rows holding predicted whole words (the "Complete" section).
-    pub predicted: std::ops::Range<usize>,
+    /// The rest of the word as once typed, dimmed after the caret (empty: none).
+    pub ghost: String,
+    /// The row being completed, the whole word, and the text it is shown
+    /// going on from (the rest is dimmed; in the preview too when selected).
+    pub completion: Option<(usize, String, String)>,
+    /// Tab inserts a completion (the key tips say so).
+    pub can_complete: bool,
     pub selected: usize,
     /// A status line (loading, errors); empty shows the key tips instead.
     pub hint: String,
@@ -200,8 +205,6 @@ pub struct Popup {
     pub hwnd: HWND,
     dpi: u32,
     rows: usize,
-    /// The first predicted row, which a "Complete" label goes above.
-    section: Option<usize>,
     fonts: Fonts,
     palette: Palette,
     /// Windows rounds the corners and draws the border (Windows 11).
@@ -257,7 +260,6 @@ impl Popup {
             hwnd,
             dpi: 96,
             rows,
-            section: None,
             fonts: Fonts::new(96),
             palette: Palette::LIGHT,
             system_frame,
@@ -296,11 +298,10 @@ impl Popup {
         self.rows = rows;
     }
 
-    /// Sizes the popup for `rows` rows with a "Complete" label above row
-    /// `section` (if any); the caller resizes the window to `size()`.
-    pub fn set_list(&mut self, rows: usize, section: Option<usize>) {
+    /// Sizes the popup for `rows` rows; the caller resizes the window to
+    /// `size()`.
+    pub fn set_list(&mut self, rows: usize) {
         self.rows = rows;
-        self.section = section.filter(|&s| s < rows);
     }
 
     pub fn size(&self) -> (i32, i32) {
@@ -332,12 +333,8 @@ impl Popup {
         let sep = inner(preview.bottom + s(4), s(1).max(1));
         let row_h = f.cand_h + s(8);
         let mut top = sep.bottom + s(5);
-        let label_h = f.small_h + s(10);
         let rows = (0..self.rows)
-            .map(|i| {
-                if self.section == Some(i) {
-                    top += label_h;
-                }
+            .map(|_| {
                 let r = RECT {
                     left: s(5),
                     top,
@@ -438,40 +435,35 @@ impl Popup {
                 ORANGE,
                 1.0,
             );
+            // The rest of the word as once typed, dimmed after the caret.
+            if !view.ghost.is_empty() && end < text_box.right {
+                let ghost_box = RECT {
+                    left: end + scale(3, self.dpi),
+                    ..text_box
+                };
+                cv.text(f.input, &view.ghost, ghost_box, p.muted, DT_LEFT | one_line);
+            }
         }
 
-        // The Tamil preview of the chosen suggestion.
-        text_tail(&mut cv, f.tamil, &view.preview, l.preview, p.text);
+        // The Tamil preview of the chosen suggestion, with the completion's
+        // rest dimmed when that's the suggestion being completed.
+        match &view.completion {
+            Some((row, word, from))
+                if *row == view.selected && view.candidates.get(*row) == Some(&view.preview) =>
+            {
+                completed(&mut cv, f.tamil, l.preview, word, from, (p.text, p.muted));
+            }
+            _ => {
+                text_tail(&mut cv, f.tamil, &view.preview, l.preview, p.text);
+            }
+        }
         let (sx, sy, sw, _) = fr(&l.sep);
         cv.round_rect(sx, sy, sw, s(1).max(1.0), 0.0, p.separator, 1.0);
 
         // The suggestions.
-        let tamil = &view.candidates[..view.predicted.start.min(view.candidates.len())];
         for (i, (row, word)) in l.rows.iter().zip(&view.candidates).enumerate() {
             let selected = i == view.selected;
             let (rx, ry, rw, rh) = fr(row);
-            if self.section == Some(i) {
-                // "Complete" and a line, above the predicted words.
-                let label = RECT {
-                    left: row.left + scale(8, self.dpi),
-                    top: row.top - f.small_h - scale(8, self.dpi),
-                    right: row.right - scale(8, self.dpi),
-                    bottom: row.top - scale(2, self.dpi),
-                };
-                cv.text(f.small, "Complete", label, p.muted, DT_LEFT | one_line);
-                let lw = cv.measure(f.small, "Complete").0 + scale(8, self.dpi);
-                let ly = ((label.top + label.bottom) / 2) as f32;
-                let lx = (label.left + lw) as f32;
-                cv.round_rect(
-                    lx,
-                    ly,
-                    label.right as f32 - lx,
-                    s(1).max(1.0),
-                    0.0,
-                    p.separator,
-                    1.0,
-                );
-            }
             if selected {
                 cv.round_rect(rx, ry, rw, rh, s(7), p.selected(), 1.0);
             }
@@ -497,57 +489,41 @@ impl Popup {
                 right: row.right - scale(8, self.dpi),
                 ..*row
             };
-            if view.predicted.contains(&i) {
-                // The letters already typed, then the predicted rest, lighter.
-                let split = typed_part(word, tamil);
-                let (head, rest) = word.split_at(split);
-                cv.text(f.cand, head, body, p.text, DT_LEFT | one_line);
-                let rest_box = RECT {
-                    left: body.left + cv.measure(f.cand, head).0,
-                    right: body.right - scale(24, self.dpi),
-                    ..body
-                };
-                cv.text(f.cand, rest, rest_box, p.muted, DT_LEFT | one_line);
-                // A "complete" arrow: →|
-                let (ax, ay) = (rx + rw - s(26), ry + rh / 2.0);
-                let (len, head_s, width) = (s(12), s(4), s(2).max(1.5) * 0.7);
-                cv.line((ax, ay), (ax + len, ay), width, p.muted, 1.0);
-                cv.line(
-                    (ax + len - head_s, ay - head_s),
-                    (ax + len, ay),
-                    width,
-                    p.muted,
-                    1.0,
-                );
-                cv.line(
-                    (ax + len - head_s, ay + head_s),
-                    (ax + len, ay),
-                    width,
-                    p.muted,
-                    1.0,
-                );
-                let bar = ax + len + s(3);
-                cv.line((bar, ay - s(5)), (bar, ay + s(5)), width, p.muted, 1.0);
-            } else {
-                cv.text(f.cand, word, body, p.text, DT_LEFT | one_line);
-            }
-            if view.english == Some(i) {
-                let tw = cv.measure(f.small, "EN").0 as f32;
+            // A chip at the right edge: "EN" on the English row, "Tab" on the
+            // suggestion being completed.
+            let chip = |cv: &mut Canvas, text: &str| -> f32 {
+                let tw = cv.measure(f.small, text).0 as f32;
                 let (cw, ch) = (tw + s(12), s(16));
                 let cx = rx + rw - s(10) - cw;
                 let cy = ry + (rh - ch) / 2.0;
                 cv.round_rect(cx, cy, cw, ch, ch / 2.0, p.key, 1.0);
-                let chip = RECT {
+                let r = RECT {
                     left: cx as i32,
                     top: cy as i32,
                     right: (cx + cw) as i32,
                     bottom: (cy + ch) as i32,
                 };
-                cv.text(f.small, "EN", chip, p.key_text, DT_CENTER | one_line);
+                cv.text(f.small, text, r, p.key_text, DT_CENTER | one_line);
+                cw + s(6)
+            };
+            let mut used_right = 0.0;
+            match &view.completion {
+                Some((done_row, done, from)) if *done_row == i => {
+                    used_right = chip(&mut cv, "Tab");
+                    let room = RECT {
+                        right: body.right - used_right as i32,
+                        ..body
+                    };
+                    completed(&mut cv, f.cand, room, done, from, (p.text, p.muted));
+                }
+                _ => cv.text(f.cand, word, body, p.text, DT_LEFT | one_line),
+            }
+            if view.english == Some(i) {
+                chip(&mut cv, "EN");
             }
             if view.learned == Some(i) {
                 // A sparkle: a big four-pointed star and a small one above it.
-                let (cx, cy) = (rx + rw - s(18), ry + rh / 2.0 + s(1));
+                let (cx, cy) = (rx + rw - s(18) - used_right, ry + rh / 2.0 + s(1));
                 cv.star(cx, cy, s(6), ORANGE, 1.0);
                 cv.star(cx + s(7), cy - s(6), s(3), ORANGE, 1.0);
             }
@@ -555,7 +531,7 @@ impl Popup {
 
         // Key tips, or a status line.
         if view.hint.is_empty() {
-            self.key_tips(&mut cv, l.hint);
+            self.key_tips(&mut cv, l.hint, view.can_complete);
         } else {
             let color = if view.warn { p.warning } else { p.muted };
             cv.text(f.small, &view.hint, l.hint, color, DT_CENTER | one_line);
@@ -564,11 +540,16 @@ impl Popup {
         cv.blit(hdc);
     }
 
-    /// "↑↓ choose  Space insert  Esc cancel", each key on a small key cap.
-    fn key_tips(&self, cv: &mut Canvas, r: RECT) {
+    /// "↑↓ choose  Space insert  Esc cancel" (or "Tab complete" first when a
+    /// completion is showing), each key on a small key cap.
+    fn key_tips(&self, cv: &mut Canvas, r: RECT, can_complete: bool) {
         let (f, p) = (&self.fonts, &self.palette);
         let s = |v: i32| scale(v, self.dpi);
-        let tips = [("↑↓", "choose"), ("Space", "insert"), ("Esc", "cancel")];
+        let tips = if can_complete {
+            [("Tab", "complete"), ("Space", "insert"), ("Esc", "cancel")]
+        } else {
+            [("↑↓", "choose"), ("Space", "insert"), ("Esc", "cancel")]
+        };
         let parts: Vec<(i32, i32)> = tips
             .iter()
             .map(|(key, label)| {
@@ -615,28 +596,28 @@ impl Popup {
     }
 }
 
-/// How many bytes of `word` match what's typed so far: its longest common
-/// start with one of the Tamil suggestions (a final pulli dropped), ended
+/// Draws `word`, which goes on from `shown` (a suggestion), as `shown`'s
+/// part in `colors.0` and the rest in `colors.1` (dimmed). The split falls
 /// where a letter is whole, so no vowel sign or pulli is cut off from it.
-fn typed_part(word: &str, tamil: &[String]) -> usize {
+fn completed(cv: &mut Canvas, font: HFONT, r: RECT, word: &str, shown: &str, colors: (Rgb, Rgb)) {
     let is_mark = |c: char| matches!(c, '\u{0B82}' | '\u{0BBE}'..='\u{0BCD}' | '\u{0BD7}');
-    let common = tamil
-        .iter()
-        .map(|t| {
-            let t = t.strip_suffix('\u{0BCD}').unwrap_or(t);
-            word.char_indices()
-                .zip(t.chars())
-                .take_while(|((_, a), b)| a == b)
-                .last()
-                .map_or(0, |((i, c), _)| i + c.len_utf8())
-        })
-        .max()
-        .unwrap_or(0);
-    let mut end = common;
-    while end > 0 && word[end..].chars().next().is_some_and(is_mark) {
-        end = word[..end].char_indices().last().map_or(0, |(i, _)| i);
+    let stem = shown.strip_suffix('\u{0BCD}').unwrap_or(shown);
+    let mut split = if word.starts_with(stem) {
+        stem.len()
+    } else {
+        0
+    };
+    while split > 0 && word[split..].chars().next().is_some_and(is_mark) {
+        split = word[..split].char_indices().last().map_or(0, |(i, _)| i);
     }
-    end
+    let (head, rest) = word.split_at(split);
+    let one_line = DT_SINGLELINE | DT_VCENTER;
+    cv.text(font, head, r, colors.0, DT_LEFT | one_line);
+    let rest_box = RECT {
+        left: r.left + cv.measure(font, head).0,
+        ..r
+    };
+    cv.text(font, rest, rest_box, colors.1, DT_LEFT | one_line);
 }
 
 /// Draws `s` left-aligned in `r`, or right-aligned when too long so the end
@@ -672,7 +653,9 @@ mod tests {
             candidates: candidates.iter().map(|s| s.to_string()).collect(),
             english: candidates.len().checked_sub(1),
             learned: None,
-            predicted: 0..0,
+            ghost: String::new(),
+            completion: None,
+            can_complete: false,
             selected: 0,
             hint: String::new(),
             warn: false,
@@ -696,22 +679,23 @@ mod tests {
             &["வணக்கம்", "வனக்கம்", "வணக்காம்", "வானக்கம்", "வனாக்கம்", "vanakkam"],
         );
         v.learned = Some(0);
-        // Typing "natch": suggestions, predicted words, then English.
-        let mut predict = view(
-            "natch",
-            "நட்ச்",
-            &["நட்ச்", "நாட்ச்", "நட்ச", "நட்சத்திரம்", "நட்சத்திரங்கள்", "நட்பு", "natch"],
+        // Typing "vanakk", with a completion from the typing history.
+        let mut complete = view(
+            "vanakk",
+            "வணக்க்",
+            &["வணக்க்", "வனக்க்", "வனக்", "வானக்க்", "வனாக்க்", "vanakk"],
         );
-        predict.predicted = 3..6;
+        complete.ghost = "am".into();
+        complete.completion = Some((0, "வணக்கம்".into(), "வணக்க்".into()));
+        complete.can_complete = true;
         let samples = [
             (false, "light", &v),
             (true, "dark", &v),
-            (false, "predict-light", &predict),
-            (true, "predict-dark", &predict),
+            (false, "complete-light", &complete),
+            (true, "complete-dark", &complete),
         ];
         for (dark, name, v) in samples {
-            let section = (!v.predicted.is_empty()).then_some(v.predicted.start);
-            popup.set_list(v.candidates.len(), section);
+            popup.set_list(v.candidates.len());
             let (w, h) = popup.size();
             popup.set_dark(dark);
             // SAFETY: a screen-compatible bitmap painted, read back within its

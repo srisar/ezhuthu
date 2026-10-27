@@ -113,6 +113,21 @@ impl Transliterator {
         })
     }
 
+    /// The whole word the user is most likely typing, from the dictionary,
+    /// but only a confident guess: the most frequent word starting with the
+    /// top candidate (or the next two) for the letters so far, when it makes
+    /// up at least `min_share` of all the words starting that way. A final
+    /// pulli is dropped, as in `predict`; words among `candidates` don't
+    /// count. None without the dictionary.
+    pub fn complete(&self, candidates: &[Candidate], min_share: f32) -> Option<String> {
+        let wf = self.word_freq.as_ref()?;
+        candidates.iter().take(3).find_map(|cand| {
+            let prefix = cand.text.strip_suffix('\u{0BCD}').unwrap_or(&cand.text);
+            let (word, share) = wf.best_completion(prefix)?;
+            (share >= min_share && !candidates.iter().any(|c| c.text == word)).then_some(word)
+        })
+    }
+
     /// Whole words the user may be typing, from the dictionary, best first:
     /// the most frequent words that start with one of the top candidates
     /// for the letters so far (`candidates`, best first). A candidate's final

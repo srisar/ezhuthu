@@ -19,26 +19,27 @@ pub enum Event {
     Done {
         key: String,
         candidates: Vec<String>,
-        /// Whole words from the dictionary the word may become (from
-        /// `PREDICT_FROM` letters on).
-        predictions: Vec<String>,
+        /// A confident whole-word completion from the dictionary (from
+        /// `COMPLETE_FROM` letters on).
+        completion: Option<String>,
     },
 }
 
-/// Whole-word predictions start once this many letters are typed.
-pub const PREDICT_FROM: usize = 3;
-/// Dictionary predictions worked out per word.
-pub const PREDICTIONS: usize = 3;
+/// Word completion starts once this many letters are typed.
+pub const COMPLETE_FROM: usize = 3;
+/// A dictionary completion is offered only when it makes up at least this
+/// share of the words starting the same way (a confident guess).
+const MIN_SHARE: f32 = 0.5;
 
-/// Candidates for `key`, and dictionary predictions once it is long enough.
-pub fn suggest(xlit: &Transliterator, key: &str) -> (Vec<String>, Vec<String>) {
+/// Candidates for `key`, and a dictionary completion once it is long enough.
+pub fn suggest(xlit: &Transliterator, key: &str) -> (Vec<String>, Option<String>) {
     let cands = xlit.transliterate(key).unwrap_or_default();
-    let predictions = if key.len() >= PREDICT_FROM {
-        xlit.predict(&cands, PREDICTIONS)
+    let completion = if key.len() >= COMPLETE_FROM {
+        xlit.complete(&cands, MIN_SHARE)
     } else {
-        Vec::new()
+        None
     };
-    (cands.into_iter().map(|c| c.text).collect(), predictions)
+    (cands.into_iter().map(|c| c.text).collect(), completion)
 }
 
 pub struct Engine {
@@ -84,11 +85,11 @@ impl Engine {
                     batch.reverse();
                     let mut seen = HashSet::new();
                     for key in batch.into_iter().filter(|k| seen.insert(k.clone())) {
-                        let (candidates, predictions) = suggest(&xlit, &key);
+                        let (candidates, completion) = suggest(&xlit, &key);
                         send(Event::Done {
                             key,
                             candidates,
-                            predictions,
+                            completion,
                         });
                     }
                 }

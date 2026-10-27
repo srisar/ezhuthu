@@ -138,8 +138,8 @@ impl Config {
              # (kept in learned.tsv next to this file).\n\
              remember_picks = {}\n\
              \n\
-             # Offer whole words after 3 letters, from your typing history (kept\n\
-             # in history.tsv next to this file) and the Tamil dictionary.\n\
+             # Complete words after 3 letters (shown dimmed; Tab inserts), from your\n\
+             # typing history (kept in history.tsv next to this file) or the dictionary.\n\
              predict = {}\n\
              \n\
              # Popup colours: \"system\" follows Windows' light/dark mode; or\n\

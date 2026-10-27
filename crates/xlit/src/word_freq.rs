@@ -127,6 +127,39 @@ impl WordFreq {
             .map(|(p, i)| (decode_word(self.record(i).0), p))
             .collect()
     }
+
+    /// The most frequent word longer than `prefix` that starts with it, and
+    /// its share of all the words starting with `prefix` (the prefix itself
+    /// included, when it is a word): how sure a completion it is, 0–1.
+    pub fn best_completion(&self, prefix: &str) -> Option<(String, f32)> {
+        const MAX_SCAN: usize = 200_000;
+        let key = encode_word(prefix)?;
+        if key.is_empty() {
+            return None;
+        }
+        let (mut lo, mut hi) = (0, self.count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.record(mid).0 < key.as_slice() {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let (mut total, mut best) = (0.0f32, None::<(f32, usize)>);
+        for i in (lo..self.count).take(MAX_SCAN) {
+            let (word, p) = self.record(i);
+            if !word.starts_with(&key) {
+                break;
+            }
+            total += p;
+            if word.len() > key.len() && best.is_none_or(|(q, _)| p > q) {
+                best = Some((p, i));
+            }
+        }
+        let (p, i) = best?;
+        Some((decode_word(self.record(i).0), p / total))
+    }
 }
 
 /// The inverse of `encode_word`.
@@ -218,6 +251,16 @@ mod tests {
             "longer words only, most frequent first"
         );
         assert!(wf.completions("கட", 3).is_empty());
+        // நடந்தது has 0.4 of the 1.8 total under நட (நட itself counts)
+        let (word, share) = wf.best_completion("நட").unwrap();
+        assert_eq!(word, "நடந்தது");
+        assert!((share - 0.4 / 1.8).abs() < 1e-6);
+        assert_eq!(
+            wf.best_completion("நடன").unwrap().1,
+            1.0,
+            "the only word under நடன"
+        );
+        assert!(wf.best_completion("கட").is_none());
         assert!(
             wf.completions("नम", 3).is_empty(),
             "outside the Tamil block"

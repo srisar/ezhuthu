@@ -43,7 +43,7 @@ Ezhuthu is a free, open-source Tamil phonetic keyboard for Windows. Press a shor
 - **Suggestions at the cursor:** up to 9 Tamil candidates per word, ranked by how common each word is. Pick one with a number or the arrow keys.
 - **English when you need it:** the last suggestion is always the word exactly as you typed it, so a few English words don't need a mode switch.
 - **Learns your words:** pick a different suggestion once and it comes first next time.
-- **Predicts whole words:** after 3 letters, the popup offers the words you are probably typing, from your own typing and the Tamil dictionary.
+- **Completes words:** after 3 letters, the rest of the word you are probably typing shows dimmed, learned from your typing; Tab inserts it.
 - **Convert selected text:** select romanized text you've already typed, press Ctrl+Alt+Shift+T, and it becomes Tamil.
 - **One shortcut:** Ctrl+Alt+T by default. Choose a preset or any combination in Settings.
 - **Private and offline:** no internet, no account. Password fields are never touched.
@@ -85,13 +85,14 @@ Ezhuthu lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray i
 | Delete | delete the letter after the cursor |
 | Backspace / Ctrl+Backspace | delete a letter / drop the word |
 | Esc | drop the word |
-| any other key (Tab, Page Up, Ctrl+S…) | insert the word, then the key does its usual job |
+| Tab | insert the completion shown dimmed, and a space (when there is one; Space and Enter do too while it is highlighted) |
+| any other key (Page Up, Ctrl+S…; Tab without a completion) | insert the word, then the key does its usual job |
 
 The last row is always the word exactly as you typed it, marked **EN**: press its number, or ↓ to it and Space.
 
 Ezhuthu remembers your choices. When you insert a suggestion other than the first, it comes first the next time you type that word, marked with a sparkle ✨. Pick the original first suggestion again to undo this. Only the words you picked are kept, in `%APPDATA%\ezhuthu\learned.tsv` on your PC. See, change, add or remove them on the **Words** tab in Settings, or turn learning off on General.
 
-After 3 letters, Ezhuthu also predicts the whole word. A **Complete** section under the suggestions offers up to three words: ones you have typed before come first (most used, then most recent), then the most common words in the Tamil dictionary that start the same way. The letters you have typed show normally and the predicted rest lighter. Pick one like any other row. The words you insert in Tamil mode are kept in `%APPDATA%\ezhuthu\history.tsv` on your PC for this; turn prediction off, or clear the history, in Settings. In a test of 200 everyday words, the right word was offered before the last letter for two in three of them, saving 38 % of the letters.
+After 3 letters, Ezhuthu also completes the word. The rest of the word you're probably typing shows dimmed: after your letters in the input box (`vanakk`*am*), and on the first Tamil suggestion and the preview (வணக்க*ம்*). It changes to the best fit as you type. Press **Tab**, or Space or Enter while that first suggestion is highlighted, to insert the whole word; pick another row to insert just that. The completion is the word you've typed most (then most recently) for those letters; until you've typed one, it comes from the Tamil dictionary, but only when one word clearly stands out. Dictionary completions show in Tamil only, since the dictionary has no English spellings. The words you insert in Tamil mode are kept in `%APPDATA%\ezhuthu\history.tsv` on your PC for this; turn completion off, or clear the history, in Settings.
 
 When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start menu search box.
 
@@ -107,7 +108,7 @@ Right-click the tray icon and choose **Settings...** (launching Ezhuthu again wh
   - suggestions per word;
   - how text is inserted (typing, or pasting for apps that garble typed Tamil);
   - remembering the suggestions you pick;
-  - predicting whole words, and clearing the typing history;
+  - completing words (Tab), and clearing the typing history;
   - the popup theme: match Windows (default), light or dark;
   - Start with Windows.
 - **Shortcuts** sets:

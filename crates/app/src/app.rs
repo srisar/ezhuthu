@@ -35,7 +35,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, ToUnicodeEx, UnregisterHotKey, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE,
     VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_MENU, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT,
-    VK_SPACE, VK_UP,
+    VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -55,7 +55,7 @@ use crate::caret;
 use crate::compose::Composer;
 use crate::config::{Config, InsertMode};
 use crate::convert;
-use crate::engine::{Engine, Event, PREDICT_FROM, suggest};
+use crate::engine::{COMPLETE_FROM, Engine, Event, suggest};
 use crate::focus;
 use crate::history::History;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
@@ -96,10 +96,6 @@ const NIN_SELECT: u32 = WM_USER;
 const HOTKEY_ID: i32 = 1;
 /// Tamil candidates shown at most (the popup adds a row for English).
 const MAX_ROWS: usize = 9;
-/// Rows at most: the number keys pick 1–9 and 0.
-const MAX_OPTIONS: usize = 10;
-/// Whole-word predictions shown at most.
-const MAX_PREDICTIONS: usize = 3;
 /// Words kept in the candidate cache before it is cleared.
 const MAX_CACHE: usize = 2000;
 /// Give up waiting for our injected events after this long (e.g. UIPI
@@ -123,8 +119,8 @@ struct App {
     xlit: Option<Arc<Transliterator>>,
     status: Status,
     cache: HashMap<String, Vec<String>>,
-    /// Dictionary predictions per word (cleared with `cache`).
-    predicted: HashMap<String, Vec<String>>,
+    /// Dictionary completions per word (cleared with `cache`).
+    completions: HashMap<String, Option<String>>,
     pending: HashSet<String>,
     /// The word (cache key) whose candidates the popup shows; see `shown`.
     shown_key: Option<String>,
@@ -179,13 +175,25 @@ fn process_of(hwnd: HWND) -> u32 {
     pid
 }
 
-/// The popup's list: `tamil` suggestions, then `predicted` whole words,
-/// then the word as typed (English).
+/// The popup's list: `tamil` suggestions, then the word as typed (English).
 #[derive(Debug, Default)]
 struct Options {
     words: Vec<String>,
     tamil: usize,
-    predicted: usize,
+    /// When the first row is the completion's: the whole word, and the text
+    /// it is shown going on from (the row, or the first suggestion when the
+    /// word was put in as a row of its own).
+    completion: Option<(String, String)>,
+}
+
+/// The whole word the current letters may complete to (shown dimmed after
+/// them; Tab inserts it).
+#[derive(Debug, Clone, PartialEq)]
+struct Completion {
+    word: String,
+    /// The letters once typed for it (from the typing history), if known;
+    /// dictionary completions have none.
+    letters: Option<String>,
 }
 
 impl Options {
@@ -196,6 +204,13 @@ impl Options {
     fn is_empty(&self) -> bool {
         self.words.is_empty()
     }
+}
+
+/// Whether `word` goes on from the suggestion `row` (starts with it, a final
+/// pulli dropped, and is longer).
+fn goes_on_from(word: &str, row: &str) -> bool {
+    let stem = row.strip_suffix('\u{0BCD}').unwrap_or(row);
+    word.len() > stem.len() && word.starts_with(stem)
 }
 
 /// A convert selection in progress, in `target` (the window it started in;
@@ -290,7 +305,7 @@ pub fn run() -> Result<()> {
         xlit: None,
         status: Status::Loading,
         cache: HashMap::new(),
-        predicted: HashMap::new(),
+        completions: HashMap::new(),
         pending: HashSet::new(),
         shown_key: None,
         learned,
@@ -778,7 +793,7 @@ impl App {
             self.swallowed.clear();
             // Forget what was typed this session.
             self.cache.clear();
-            self.predicted.clear();
+            self.completions.clear();
         }
         let tip = tooltip(&self.config, self.on);
         self.tray.set_state(self.on, &tip);
@@ -792,7 +807,7 @@ impl App {
         self.xlit = None;
         self.status = Status::Loading;
         self.cache.clear();
-        self.predicted.clear();
+        self.completions.clear();
         self.pending.clear();
         self.popup.set_rows(popup_rows(beam));
         self.cancel_convert(None);
@@ -814,9 +829,9 @@ impl App {
         }
     }
 
-    /// The Tamil candidates of `key` that fit, then whole words it may
-    /// become (from `PREDICT_FROM` letters on), then the current word as
-    /// typed; at most `MAX_OPTIONS` (the number keys reach 10).
+    /// The Tamil candidates of `key` that fit, then the current word as typed.
+    /// With a completion, the suggestion it goes on from comes first (or
+    /// the completed word itself, when none does).
     fn options(&self, key: Option<&str>) -> Options {
         let (Some(key), Some(tamil)) = (key, key.and_then(|k| self.cache.get(k))) else {
             return Options::default();
@@ -825,32 +840,37 @@ impl App {
         if self.config.remember_picks {
             self.learned.apply(key, &mut words);
         }
+        let mut completion = None;
+        if self.composer.key().as_deref() == Some(key)
+            && let Some(c) = self.completion()
+        {
+            let shown = match words.iter().position(|row| goes_on_from(&c.word, row)) {
+                Some(i) => {
+                    let row = words.remove(i);
+                    words.insert(0, row.clone());
+                    row
+                }
+                None => {
+                    let first = words.first().cloned().unwrap_or_default();
+                    words.insert(0, c.word.clone());
+                    first
+                }
+            };
+            completion = Some((c.word, shown));
+        }
         words.truncate(self.tamil_rows());
         let tamil = words.len();
-        let room = MAX_OPTIONS.saturating_sub(tamil + 1).min(MAX_PREDICTIONS);
-        let mut predicted = 0;
-        if self.config.predict && key.len() >= PREDICT_FROM && room > 0 {
-            // Words typed before come first, then the dictionary's.
-            let mut more = self.history.predict(key, &words, room);
-            for word in self.predicted.get(key).into_iter().flatten() {
-                if more.len() < room && !words.contains(word) && !more.contains(word) {
-                    more.push(word.clone());
-                }
-            }
-            predicted = more.len();
-            words.extend(more);
-        }
         words.push(self.composer.core().to_string());
         Options {
             words,
             tamil,
-            predicted,
+            completion,
         }
     }
 
-    /// Records the word being inserted: a Tamil pick (not a prediction or
-    /// the English row) may be learned, and any Tamil word goes into the
-    /// typing history; both are saved soon after.
+    /// Records the word being inserted: a Tamil pick (not the English row)
+    /// may be learned, and goes into the typing history (for completions);
+    /// both are saved soon after.
     fn learn(&mut self, options: &Options) {
         let selected = self.composer.selected();
         let chosen = if selected < options.len() {
@@ -875,7 +895,7 @@ impl App {
                 changed = true;
             }
         }
-        if self.config.predict && chosen < options.tamil + options.predicted {
+        if self.config.predict && chosen < options.tamil {
             self.history.record(&key, word);
             self.history_dirty = true;
             changed = true;
@@ -911,16 +931,55 @@ impl App {
         }
     }
 
-    /// Fills in the current word's candidates (and predictions) now if the
-    /// engine hasn't yet (~40 ms), for a key that commits before it answers.
+    /// Fills in the current word's candidates now if the engine hasn't yet
+    /// (~40 ms), for a key that commits before it answers.
     fn ensure_candidates(&mut self) {
         if let (Some(key), Some(xlit)) = (self.composer.key(), &self.xlit)
             && !self.cache.contains_key(&key)
         {
-            let (cands, predictions) = suggest(xlit, &key);
-            self.predicted.insert(key.clone(), predictions);
+            let (cands, completion) = suggest(xlit, &key);
+            self.completions.insert(key.clone(), completion);
             self.cache.insert(key, cands);
         }
+    }
+
+    /// The whole word the letters typed may complete to (from `COMPLETE_FROM`
+    /// letters on): the best word typed before for them, else a confident
+    /// guess from the dictionary.
+    fn completion(&self) -> Option<Completion> {
+        if !self.config.predict {
+            return None;
+        }
+        let key = self.composer.key()?;
+        if key.len() < COMPLETE_FROM {
+            return None;
+        }
+        if let Some((letters, word)) = self.history.complete(&key) {
+            return Some(Completion {
+                word: word.to_string(),
+                letters: Some(letters.to_string()),
+            });
+        }
+        let word = self.completions.get(&key)?.clone()?;
+        Some(Completion {
+            word,
+            letters: None,
+        })
+    }
+
+    /// Inserts the completion plus `suffix` (Tab, or picking the first row,
+    /// which shows it), and remembers it.
+    fn complete_word(&mut self, suffix: &str) {
+        let (Some(completion), Some(key)) = (self.completion(), self.composer.key()) else {
+            return;
+        };
+        let letters = completion.letters.as_deref().unwrap_or(&key);
+        self.history.record(letters, &completion.word);
+        self.history_dirty = true;
+        post(self.main, WM_APP_SAVE_LEARNED);
+        let text = self.composer.render_word(&completion.word) + suffix;
+        self.discard();
+        self.emit(Out::Text(text));
     }
 
     /// Tamil suggestions shown per word (the beam, up to `MAX_ROWS`).
@@ -963,7 +1022,7 @@ impl App {
         // Read each time, so a change to Windows' light/dark mode shows at once.
         self.popup.set_dark(self.config.theme.is_dark());
         self.popup.set_dpi(caret::dpi_at(anchor));
-        self.popup.set_list(self.tamil_rows() + 1, None);
+        self.popup.set_list(self.tamil_rows() + 1);
         let (w, h) = self.popup.size();
         let (x, y) = caret::place(anchor, w, h, self.popup.gap());
         self.anchor = Some(anchor);
@@ -1009,8 +1068,7 @@ impl App {
         } else {
             list.len()
         };
-        let section = (list.predicted > 0).then_some(list.tamil);
-        self.popup.set_list(rows, section);
+        self.popup.set_list(rows);
         let (w, h) = self.popup.size();
         let Some(anchor) = self.anchor else {
             return;
@@ -1071,6 +1129,11 @@ impl App {
         }
         self.ensure_candidates();
         let options = self.candidates();
+        // The first row shows the completed word: that is what goes in.
+        if options.completion.is_some() && self.composer.selected() == 0 {
+            self.complete_word(suffix);
+            return;
+        }
         self.learn(&options);
         let text = self.composer.render(Some(&options.words)) + suffix;
         self.discard();
@@ -1236,6 +1299,11 @@ impl App {
                 self.composer.cursor_to(v == VK_END.0);
                 self.invalidate();
             }
+            // Tab inserts the completion (when there is one; else it's just
+            // another key, below).
+            v if v == VK_TAB.0 && composing && self.completion().is_some() => {
+                self.complete_word(" ");
+            }
             v if v == VK_DELETE.0 && composing => {
                 self.composer.delete();
                 self.after_edit();
@@ -1285,8 +1353,24 @@ impl App {
             .position(|o| o == word)
     }
 
+    /// The rest of the letters once typed for `c`, to show dimmed after the
+    /// caret: only when the caret is at the end of the word.
+    fn ghost_letters(&self, c: &Completion) -> String {
+        let (Some(letters), Some(key)) = (&c.letters, self.composer.key()) else {
+            return String::new();
+        };
+        let text = self.composer.text();
+        let at_end = self.composer.cursor() == text.chars().count();
+        if at_end && text.ends_with(self.composer.core()) && letters.starts_with(&key) {
+            letters[key.len()..].to_string()
+        } else {
+            String::new()
+        }
+    }
+
     fn view(&self) -> View {
         let candidates = self.shown();
+        let completion = self.completion();
         let (hint, warn) = if let Some(f) = &self.flash {
             (f.clone(), true)
         } else {
@@ -1303,7 +1387,15 @@ impl App {
             preview: self.composer.render(Some(&candidates.words)),
             english: candidates.len().checked_sub(1),
             learned: self.learned_row(&candidates),
-            predicted: candidates.tamil..candidates.tamil + candidates.predicted,
+            ghost: completion
+                .as_ref()
+                .map(|c| self.ghost_letters(c))
+                .unwrap_or_default(),
+            completion: candidates
+                .completion
+                .clone()
+                .map(|(word, shown)| (0, word, shown)),
+            can_complete: completion.is_some(),
             candidates: candidates.words,
             selected: self.composer.selected(),
             hint,
@@ -1390,15 +1482,15 @@ fn on_engine_events() {
                 Event::Done {
                     key,
                     candidates,
-                    predictions,
+                    completion,
                 } => {
                     a.pending.remove(&key);
                     // Bounded: typed words should not pile up in memory.
                     if a.cache.len() >= MAX_CACHE {
                         a.cache.clear();
-                        a.predicted.clear();
+                        a.completions.clear();
                     }
-                    a.predicted.insert(key.clone(), predictions);
+                    a.completions.insert(key.clone(), completion);
                     a.cache.insert(key, candidates);
                 }
             }

@@ -426,7 +426,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
         )?);
         general.push(child(
             w!("BUTTON"),
-            "Predict whole words as I type",
+            "Complete words as I type (Tab)",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_PREDICT,
