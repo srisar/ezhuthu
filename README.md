@@ -43,6 +43,7 @@ Ezhuthu is a free, open-source Tamil phonetic keyboard for Windows. Press a shor
 - **Suggestions at the cursor:** up to 9 Tamil candidates per word, ranked by how common each word is. Pick one with a number or the arrow keys.
 - **English when you need it:** the last suggestion is always the word exactly as you typed it, so a few English words don't need a mode switch.
 - **Learns your words:** pick a different suggestion once and it comes first next time.
+- **Predicts whole words:** after 3 letters, the popup offers the words you are probably typing, from your own typing and the Tamil dictionary.
 - **Convert selected text:** select romanized text you've already typed, press Ctrl+Alt+Shift+T, and it becomes Tamil.
 - **One shortcut:** Ctrl+Alt+T by default. Choose a preset or any combination in Settings.
 - **Private and offline:** no internet, no account. Password fields are never touched.
@@ -90,6 +91,8 @@ The last row is always the word exactly as you typed it, marked **EN**: press it
 
 Ezhuthu remembers your choices. When you insert a suggestion other than the first, it comes first the next time you type that word, marked with a sparkle ✨. Pick the original first suggestion again to undo this. Only the words you picked are kept, in `%APPDATA%\ezhuthu\learned.tsv` on your PC. See, change, add or remove them on the **Words** tab in Settings, or turn learning off on General.
 
+After 3 letters, Ezhuthu also predicts the whole word. A **Complete** section under the suggestions offers up to three words: ones you have typed before come first (most used, then most recent), then the most common words in the Tamil dictionary that start the same way. The letters you have typed show normally and the predicted rest lighter. Pick one like any other row. The words you insert in Tamil mode are kept in `%APPDATA%\ezhuthu\history.tsv` on your PC for this; turn prediction off, or clear the history, in Settings. In a test of 200 everyday words, the right word was offered before the last letter for two in three of them, saving 38 % of the letters.
+
 When no word is in progress, digits, punctuation, Enter, arrows and shortcuts type normally. Punctuation typed right after a word stays with it, so `amma,` gives அம்மா,. The popup never takes focus, so it also works over the Start menu search box.
 
 ### Convert selection
@@ -104,6 +107,7 @@ Right-click the tray icon and choose **Settings...** (launching Ezhuthu again wh
   - suggestions per word;
   - how text is inserted (typing, or pasting for apps that garble typed Tamil);
   - remembering the suggestions you pick;
+  - predicting whole words, and clearing the typing history;
   - the popup theme: match Windows (default), light or dark;
   - Start with Windows.
 - **Shortcuts** sets:
@@ -164,6 +168,8 @@ cargo test --release -p ezhuthu-xlit
 ```
 
 The tests check the §8 acceptance words (each expected word in the top 5) and exact top-5 parity with the Python reference on `tests/golden_top5.tsv`. To regenerate that file after re-exporting, run `uv run python xlit_ref.py --golden ../../tests/parity_words.txt > ../../tests/golden_top5.tsv` from `tools/export`.
+
+To measure whole-word prediction, run `cargo run --release -p ezhuthu-xlit --example predict_eval`: it types each word of `tests/predict_words.txt` letter by letter and reports how often the word is already offered after 3, 4, 5… letters, and how many letters that saves.
 
 ### Model export (one-time, Python)
 

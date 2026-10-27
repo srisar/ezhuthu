@@ -19,7 +19,26 @@ pub enum Event {
     Done {
         key: String,
         candidates: Vec<String>,
+        /// Whole words from the dictionary the word may become (from
+        /// `PREDICT_FROM` letters on).
+        predictions: Vec<String>,
     },
+}
+
+/// Whole-word predictions start once this many letters are typed.
+pub const PREDICT_FROM: usize = 3;
+/// Dictionary predictions worked out per word.
+pub const PREDICTIONS: usize = 3;
+
+/// Candidates for `key`, and dictionary predictions once it is long enough.
+pub fn suggest(xlit: &Transliterator, key: &str) -> (Vec<String>, Vec<String>) {
+    let cands = xlit.transliterate(key).unwrap_or_default();
+    let predictions = if key.len() >= PREDICT_FROM {
+        xlit.predict(&cands, PREDICTIONS)
+    } else {
+        Vec::new()
+    };
+    (cands.into_iter().map(|c| c.text).collect(), predictions)
 }
 
 pub struct Engine {
@@ -65,11 +84,12 @@ impl Engine {
                     batch.reverse();
                     let mut seen = HashSet::new();
                     for key in batch.into_iter().filter(|k| seen.insert(k.clone())) {
-                        let candidates = xlit
-                            .transliterate(&key)
-                            .map(|c| c.into_iter().map(|c| c.text).collect())
-                            .unwrap_or_default();
-                        send(Event::Done { key, candidates });
+                        let (candidates, predictions) = suggest(&xlit, &key);
+                        send(Event::Done {
+                            key,
+                            candidates,
+                            predictions,
+                        });
                     }
                 }
             })

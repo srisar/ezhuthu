@@ -54,6 +54,8 @@ pub struct Config {
     pub beam: usize,
     /// Learn the suggestions the user picks (see `learned`).
     pub remember_picks: bool,
+    /// Offer whole words as you type (see `history` and `Transliterator::predict`).
+    pub predict: bool,
     pub theme: Theme,
     /// The welcome tour has been shown (it opens by itself until then).
     pub welcome_shown: bool,
@@ -68,6 +70,7 @@ impl Default for Config {
             insert_mode: InsertMode::Unicode,
             beam: ezhuthu_xlit::DEFAULT_BEAM,
             remember_picks: true,
+            predict: true,
             theme: Theme::System,
             welcome_shown: false,
             assets_dir: None,
@@ -135,6 +138,10 @@ impl Config {
              # (kept in learned.tsv next to this file).\n\
              remember_picks = {}\n\
              \n\
+             # Offer whole words after 3 letters, from your typing history (kept\n\
+             # in history.tsv next to this file) and the Tamil dictionary.\n\
+             predict = {}\n\
+             \n\
              # Popup colours: \"system\" follows Windows' light/dark mode; or\n\
              # \"light\" or \"dark\".\n\
              theme = {}\n\
@@ -149,6 +156,7 @@ impl Config {
             quote(mode),
             self.beam,
             self.remember_picks,
+            self.predict,
             quote(self.theme.as_str()),
             self.welcome_shown,
         )
@@ -219,6 +227,7 @@ mod tests {
             insert_mode: InsertMode::Clipboard,
             beam: 7,
             remember_picks: false,
+            predict: false,
             theme: Theme::Dark,
             welcome_shown: true,
             assets_dir: Some(PathBuf::from(r#"D:\it's "odd"\assets"#)),

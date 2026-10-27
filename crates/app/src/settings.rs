@@ -81,6 +81,8 @@ const ID_WORD_TAMIL: i32 = 35;
 const ID_WORD_SAVE: i32 = 36;
 const ID_WORD_REMOVE: i32 = 37;
 const ID_WORD_CLEAR: i32 = 38;
+const ID_PREDICT: i32 = 39;
+const ID_CLEAR_HISTORY: i32 = 42;
 /// Radio buttons for the presets, then "Custom".
 const ID_PRESET: i32 = 20;
 const ID_CUSTOM: i32 = ID_PRESET + PRESETS.len() as i32;
@@ -115,6 +117,7 @@ pub struct Values {
     pub insert_mode: InsertMode,
     pub beam: usize,
     pub remember_picks: bool,
+    pub predict: bool,
     pub theme: Theme,
     pub autostart: bool,
     /// The learned words as (romanized key, Tamil word), sorted by key.
@@ -129,6 +132,8 @@ pub struct Actions {
     pub apply: Apply,
     /// The model's suggestions for a romanized word (the Words tab's dropdown).
     pub suggest: fn(&str) -> Vec<String>,
+    /// Clears the typing history now (the "Clear typing history…" button).
+    pub clear_history: fn() -> Result<(), String>,
     /// Runs when the window closes, whether by OK or Cancel.
     pub on_close: fn(),
 }
@@ -153,6 +158,7 @@ struct Window {
     filling: bool,
     apply: Apply,
     suggest: fn(&str) -> Vec<String>,
+    clear_history: fn() -> Result<(), String>,
     on_close: fn(),
 }
 
@@ -418,15 +424,31 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             "see and edit them on the Words tab",
             (X + 280, 182, RIGHT - X - 280, 18),
         )?);
+        general.push(child(
+            w!("BUTTON"),
+            "Predict whole words as I type",
+            tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
+            none,
+            ID_PREDICT,
+            (X, 210, 250, 22),
+        )?);
+        general.push(child(
+            w!("BUTTON"),
+            "Clear typing history…",
+            tab | BS_PUSHBUTTON as u32,
+            none,
+            ID_CLEAR_HISTORY,
+            (RIGHT - 160, 208, 160, 26),
+        )?);
 
-        general.extend(section("Appearance", 216)?);
+        general.extend(section("Appearance", 246)?);
         general.push(child(
             w!("STATIC"),
             "Popup theme",
             0,
             none,
             -1,
-            (X, 242, 200, 20),
+            (X, 272, 200, 20),
         )?);
         let theme = child(
             w!("COMBOBOX"),
@@ -434,18 +456,18 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             tab | WS_GROUP.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32,
             none,
             ID_THEME,
-            (RIGHT - 160, 238, 160, 200),
+            (RIGHT - 160, 268, 160, 200),
         )?;
         general.push(theme);
 
-        general.extend(section("Startup", 280)?);
+        general.extend(section("Startup", 310)?);
         general.push(child(
             w!("BUTTON"),
             "Start Ezhuthu when I sign in to Windows",
             tab | WS_GROUP.0 | BS_AUTOCHECKBOX as u32,
             none,
             ID_AUTOSTART,
-            (X, 304, 420, 22),
+            (X, 334, 420, 22),
         )?);
 
         // -------------------------------------------------------------- Shortcuts
@@ -819,6 +841,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
             None,
         );
         let _ = CheckDlgButton(hwnd, ID_REMEMBER, check(values.remember_picks));
+        let _ = CheckDlgButton(hwnd, ID_PREDICT, check(values.predict));
         let _ = CheckDlgButton(hwnd, ID_AUTOSTART, check(values.autostart));
         let _ = CheckDlgButton(hwnd, ID_CONVERT_ON, check(convert_on));
         let _ = EnableWindow(convert_box, convert_on);
@@ -837,6 +860,7 @@ fn create(values: Values, actions: Actions) -> windows::core::Result<()> {
                 filling: false,
                 apply: actions.apply,
                 suggest: actions.suggest,
+                clear_history: actions.clear_history,
                 on_close: actions.on_close,
             });
         });
@@ -909,6 +933,7 @@ fn read(
         insert_mode,
         beam,
         remember_picks: checked(hwnd, ID_REMEMBER),
+        predict: checked(hwnd, ID_PREDICT),
         theme: THEMES[selection(hwnd, ID_THEME).min(THEMES.len() - 1)].0,
         autostart: checked(hwnd, ID_AUTOSTART),
         learned,
@@ -1209,6 +1234,29 @@ fn on_word_remove(hwnd: HWND) {
 }
 
 /// "Remove all…": asks, then empties the list.
+/// "Clear typing history…": asks, then clears it straight away.
+fn on_clear_history(hwnd: HWND) {
+    let Some(clear) = WINDOW.with(|w| w.borrow().as_ref().map(|w| w.clear_history)) else {
+        return;
+    };
+    // SAFETY: a message box owned by our window; both strings are valid.
+    let answer = unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            w!(
+                "Clear the words Ezhuthu has kept from your typing?\n\nPredictions then come from the dictionary only, until you type more."
+            ),
+            w!("Ezhuthu settings"),
+            MB_YESNO | MB_ICONQUESTION,
+        )
+    };
+    if answer == IDYES
+        && let Err(msg) = clear()
+    {
+        warn(hwnd, &msg);
+    }
+}
+
 fn on_word_clear(hwnd: HWND) {
     if learned_words().is_empty() {
         return;
@@ -1375,6 +1423,7 @@ unsafe extern "system" fn window_proc(
                 ID_WORD_SAVE => on_word_save(hwnd),
                 ID_WORD_REMOVE => on_word_remove(hwnd),
                 ID_WORD_CLEAR => on_word_clear(hwnd),
+                ID_CLEAR_HISTORY => on_clear_history(hwnd),
                 id @ (ID_WORD_SEARCH | ID_WORD_KEY)
                     if (wparam.0 >> 16) as u32 == EN_CHANGE
                         && !WINDOW.with(|w| w.borrow().as_ref().is_some_and(|w| w.filling)) =>
@@ -1565,6 +1614,7 @@ mod tests {
             insert_mode: InsertMode::Unicode,
             beam: 5,
             remember_picks: true,
+            predict: true,
             theme: Theme::System,
             autostart: false,
             learned: vec![
@@ -1578,6 +1628,7 @@ mod tests {
             Actions {
                 apply,
                 suggest,
+                clear_history: || Ok(()),
                 on_close: closed,
             },
         );
@@ -1655,6 +1706,7 @@ mod tests {
             insert_mode: InsertMode::Unicode,
             beam: 5,
             remember_picks: true,
+            predict: true,
             theme: Theme::System,
             autostart: true,
             learned: vec![
@@ -1671,6 +1723,7 @@ mod tests {
             Actions {
                 apply,
                 suggest,
+                clear_history: || Ok(()),
                 on_close: closed,
             },
         );

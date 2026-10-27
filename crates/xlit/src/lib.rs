@@ -113,6 +113,36 @@ impl Transliterator {
         })
     }
 
+    /// Whole words the user may be typing, from the dictionary, best first:
+    /// the most frequent words that start with one of the top candidates
+    /// for the letters so far (`candidates`, best first). A candidate's final
+    /// pulli (்) is dropped, since the word goes on past it; candidates
+    /// further down count for less. Words among `candidates` are left out.
+    /// Empty without the dictionary.
+    pub fn predict(&self, candidates: &[Candidate], limit: usize) -> Vec<String> {
+        /// How much each of the top candidates' completions count.
+        const RANK_WEIGHT: [f32; 3] = [1.0, 0.5, 0.25];
+        let Some(wf) = &self.word_freq else {
+            return Vec::new();
+        };
+        let mut scored: Vec<(f32, String)> = Vec::new();
+        for (cand, weight) in candidates.iter().zip(RANK_WEIGHT) {
+            let prefix = cand.text.strip_suffix('\u{0BCD}').unwrap_or(&cand.text);
+            for (word, p) in wf.completions(prefix, limit) {
+                if candidates.iter().any(|c| c.text == word) {
+                    continue;
+                }
+                let score = p * weight;
+                match scored.iter_mut().find(|(_, w)| *w == word) {
+                    Some(entry) => entry.0 = entry.0.max(score),
+                    None => scored.push((score, word)),
+                }
+            }
+        }
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scored.into_iter().take(limit).map(|(_, w)| w).collect()
+    }
+
     /// Top-`beam` candidates in raw beam-search order (no rescoring).
     pub fn transliterate_raw(&self, word: &str) -> Result<Vec<Candidate>> {
         let Some(src) = self.encode_source(word) else {

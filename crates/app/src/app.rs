@@ -42,11 +42,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HHOOK,
     HWND_TOPMOST, IsDialogMessageW, KBDLLHOOKSTRUCT, KillTimer, LLKHF_EXTENDED, MA_NOACTIVATE, MSG,
     PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos, SetWindowsHookExW, ShowWindow,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE,
-    WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WM_TIMER, WM_USER, WNDCLASSEXW,
+    SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetTimer, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT,
+    WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_PAINT, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_TIMER, WM_USER, WNDCLASSEXW,
 };
 use windows::core::w;
 
@@ -55,8 +55,9 @@ use crate::caret;
 use crate::compose::Composer;
 use crate::config::{Config, InsertMode};
 use crate::convert;
-use crate::engine::{Engine, Event};
+use crate::engine::{Engine, Event, PREDICT_FROM, suggest};
 use crate::focus;
+use crate::history::History;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::insert::{self, Out, SavedClipboard};
 use crate::learned::Learned;
@@ -95,6 +96,10 @@ const NIN_SELECT: u32 = WM_USER;
 const HOTKEY_ID: i32 = 1;
 /// Tamil candidates shown at most (the popup adds a row for English).
 const MAX_ROWS: usize = 9;
+/// Rows at most: the number keys pick 1–9 and 0.
+const MAX_OPTIONS: usize = 10;
+/// Whole-word predictions shown at most.
+const MAX_PREDICTIONS: usize = 3;
 /// Words kept in the candidate cache before it is cleared.
 const MAX_CACHE: usize = 2000;
 /// Give up waiting for our injected events after this long (e.g. UIPI
@@ -118,6 +123,8 @@ struct App {
     xlit: Option<Arc<Transliterator>>,
     status: Status,
     cache: HashMap<String, Vec<String>>,
+    /// Dictionary predictions per word (cleared with `cache`).
+    predicted: HashMap<String, Vec<String>>,
     pending: HashSet<String>,
     /// The word (cache key) whose candidates the popup shows; see `shown`.
     shown_key: Option<String>,
@@ -125,12 +132,20 @@ struct App {
     learned: Learned,
     learned_path: Option<PathBuf>,
     learned_dirty: bool,
+    /// Words inserted, for predictions, and their file (None: not saved).
+    history: History,
+    history_path: Option<PathBuf>,
+    history_dirty: bool,
     /// Tamil mode: the keyboard hook is installed.
     on: bool,
     kb_hook: Option<HHOOK>,
     fg_hook: Option<HWINEVENTHOOK>,
     composer: Composer,
     visible: bool,
+    /// Where the popup was placed (its caret) and its current size, so it can
+    /// grow or shrink with the list.
+    anchor: Option<caret::Anchor>,
+    popup_size: (i32, i32),
     /// Keys whose key-down we swallowed; their key-up is swallowed too.
     swallowed: HashSet<u16>,
     /// Output waiting to be injected, in order.
@@ -162,6 +177,25 @@ fn process_of(hwnd: HWND) -> u32 {
     // SAFETY: plain query.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     pid
+}
+
+/// The popup's list: `tamil` suggestions, then `predicted` whole words,
+/// then the word as typed (English).
+#[derive(Debug, Default)]
+struct Options {
+    words: Vec<String>,
+    tamil: usize,
+    predicted: usize,
+}
+
+impl Options {
+    fn len(&self) -> usize {
+        self.words.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
 }
 
 /// A convert selection in progress, in `target` (the window it started in;
@@ -231,6 +265,17 @@ pub fn run() -> Result<()> {
     };
     let learned_path = learned_path.filter(|_| learned.is_some());
     let learned = learned.unwrap_or_default();
+    let history_path = History::path().ok();
+    let history = match history_path.as_deref().map(History::load) {
+        Some(Ok(h)) => Some(h),
+        Some(Err(e)) => {
+            eprintln!("typing history not loaded: {e:#}");
+            None
+        }
+        None => None,
+    };
+    let history_path = history_path.filter(|_| history.is_some());
+    let history = history.unwrap_or_default();
 
     focus::start();
     let engine = Engine::start(config.assets_dir(), config.beam, main, WM_APP_ENGINE);
@@ -245,16 +290,22 @@ pub fn run() -> Result<()> {
         xlit: None,
         status: Status::Loading,
         cache: HashMap::new(),
+        predicted: HashMap::new(),
         pending: HashSet::new(),
         shown_key: None,
         learned,
         learned_path,
         learned_dirty: false,
+        history,
+        history_path,
+        history_dirty: false,
         on: false,
         kb_hook: None,
         fg_hook: None,
         composer: Composer::default(),
         visible: false,
+        anchor: None,
+        popup_size: (0, 0),
         swallowed: HashSet::new(),
         outbox: Vec::new(),
         flush_posted: false,
@@ -727,6 +778,7 @@ impl App {
             self.swallowed.clear();
             // Forget what was typed this session.
             self.cache.clear();
+            self.predicted.clear();
         }
         let tip = tooltip(&self.config, self.on);
         self.tray.set_state(self.on, &tip);
@@ -740,6 +792,7 @@ impl App {
         self.xlit = None;
         self.status = Status::Loading;
         self.cache.clear();
+        self.predicted.clear();
         self.pending.clear();
         self.popup.set_rows(popup_rows(beam));
         self.cancel_convert(None);
@@ -747,37 +800,58 @@ impl App {
 
     /// The popup's options once the word's Tamil candidates are known: those
     /// that fit, then the word as typed, for English without leaving Tamil mode.
-    fn candidates(&self) -> Vec<String> {
+    fn candidates(&self) -> Options {
         self.options(self.composer.key().as_deref())
     }
 
     /// What the popup shows: the current options, or until they arrive the
     /// last ones shown for this word, so the rows don't blank out (flicker)
     /// on every letter.
-    fn shown(&self) -> Vec<String> {
+    fn shown(&self) -> Options {
         match self.candidates() {
             list if list.is_empty() => self.options(self.shown_key.as_deref()),
             list => list,
         }
     }
 
-    /// The Tamil candidates of `key` that fit, then the current word as typed.
-    fn options(&self, key: Option<&str>) -> Vec<String> {
+    /// The Tamil candidates of `key` that fit, then whole words it may
+    /// become (from `PREDICT_FROM` letters on), then the current word as
+    /// typed; at most `MAX_OPTIONS` (the number keys reach 10).
+    fn options(&self, key: Option<&str>) -> Options {
         let (Some(key), Some(tamil)) = (key, key.and_then(|k| self.cache.get(k))) else {
-            return Vec::new();
+            return Options::default();
         };
-        let mut list = tamil.clone();
+        let mut words = tamil.clone();
         if self.config.remember_picks {
-            self.learned.apply(key, &mut list);
+            self.learned.apply(key, &mut words);
         }
-        list.truncate(self.rows() - 1);
-        list.push(self.composer.core().to_string());
-        list
+        words.truncate(self.tamil_rows());
+        let tamil = words.len();
+        let room = MAX_OPTIONS.saturating_sub(tamil + 1).min(MAX_PREDICTIONS);
+        let mut predicted = 0;
+        if self.config.predict && key.len() >= PREDICT_FROM && room > 0 {
+            // Words typed before come first, then the dictionary's.
+            let mut more = self.history.predict(key, &words, room);
+            for word in self.predicted.get(key).into_iter().flatten() {
+                if more.len() < room && !words.contains(word) && !more.contains(word) {
+                    more.push(word.clone());
+                }
+            }
+            predicted = more.len();
+            words.extend(more);
+        }
+        words.push(self.composer.core().to_string());
+        Options {
+            words,
+            tamil,
+            predicted,
+        }
     }
 
-    /// Remembers a Tamil pick for the current word (not the English row),
-    /// and saves soon after if that changed anything.
-    fn learn(&mut self, options: &[String]) {
+    /// Records the word being inserted: a Tamil pick (not a prediction or
+    /// the English row) may be learned, and any Tamil word goes into the
+    /// typing history; both are saved soon after.
+    fn learn(&mut self, options: &Options) {
         let selected = self.composer.selected();
         let chosen = if selected < options.len() {
             selected
@@ -787,30 +861,44 @@ impl App {
         let Some(key) = self.composer.key() else {
             return;
         };
-        if !self.config.remember_picks || chosen + 1 >= options.len() {
+        let Some(word) = options.words.get(chosen) else {
             return;
+        };
+        let mut changed = false;
+        if self.config.remember_picks && chosen < options.tamil {
+            let model_top = self.cache.get(&key).and_then(|c| c.first());
+            if self
+                .learned
+                .record(&key, word, model_top.map(String::as_str))
+            {
+                self.learned_dirty = true;
+                changed = true;
+            }
         }
-        let model_top = self.cache.get(&key).and_then(|c| c.first());
-        if self
-            .learned
-            .record(&key, &options[chosen], model_top.map(String::as_str))
-            && !self.learned_dirty
-        {
-            self.learned_dirty = true;
+        if self.config.predict && chosen < options.tamil + options.predicted {
+            self.history.record(&key, word);
+            self.history_dirty = true;
+            changed = true;
+        }
+        if changed {
             post(self.main, WM_APP_SAVE_LEARNED);
         }
     }
 
-    /// Writes the learned words if they changed (posted, so the file write
-    /// never happens inside the keyboard hook).
+    /// Writes the learned words and the typing history if they changed
+    /// (posted, so the file writes never happen inside the keyboard hook).
     fn save_learned(&mut self) {
-        if !std::mem::take(&mut self.learned_dirty) {
-            return;
-        }
-        if let Some(path) = &self.learned_path
+        if std::mem::take(&mut self.learned_dirty)
+            && let Some(path) = &self.learned_path
             && let Err(e) = self.learned.save(path)
         {
             eprintln!("learned words not saved: {e:#}");
+        }
+        if std::mem::take(&mut self.history_dirty)
+            && let Some(path) = &self.history_path
+            && let Err(e) = self.history.save(path)
+        {
+            eprintln!("typing history not saved: {e:#}");
         }
     }
 
@@ -823,22 +911,21 @@ impl App {
         }
     }
 
-    /// Fills in the current word's candidates now if the engine hasn't yet
-    /// (~40 ms), for a key that commits before it answers.
+    /// Fills in the current word's candidates (and predictions) now if the
+    /// engine hasn't yet (~40 ms), for a key that commits before it answers.
     fn ensure_candidates(&mut self) {
         if let (Some(key), Some(xlit)) = (self.composer.key(), &self.xlit)
             && !self.cache.contains_key(&key)
         {
-            let cands = xlit
-                .transliterate(&key)
-                .map(|c| c.into_iter().map(|c| c.text).collect())
-                .unwrap_or_default();
+            let (cands, predictions) = suggest(xlit, &key);
+            self.predicted.insert(key.clone(), predictions);
             self.cache.insert(key, cands);
         }
     }
 
-    fn rows(&self) -> usize {
-        self.popup.rows()
+    /// Tamil suggestions shown per word (the beam, up to `MAX_ROWS`).
+    fn tamil_rows(&self) -> usize {
+        self.config.beam.min(MAX_ROWS)
     }
 
     /// Requests the current word from the engine unless cached or pending.
@@ -876,8 +963,11 @@ impl App {
         // Read each time, so a change to Windows' light/dark mode shows at once.
         self.popup.set_dark(self.config.theme.is_dark());
         self.popup.set_dpi(caret::dpi_at(anchor));
+        self.popup.set_list(self.tamil_rows() + 1, None);
         let (w, h) = self.popup.size();
         let (x, y) = caret::place(anchor, w, h, self.popup.gap());
+        self.anchor = Some(anchor);
+        self.popup_size = (w, h);
         self.visible = true;
         // SAFETY: our own window; SWP_NOACTIVATE keeps focus in the app.
         unsafe {
@@ -902,10 +992,45 @@ impl App {
         }
     }
 
-    fn invalidate(&self) {
+    fn invalidate(&mut self) {
         if self.visible {
+            self.fit_popup();
             // SAFETY: our own window; painting happens later via WM_PAINT.
             let _ = unsafe { InvalidateRect(Some(self.popup.hwnd), None, false) };
+        }
+    }
+
+    /// Grows or shrinks the popup to the list (predictions come and go),
+    /// placed again by its caret so it stays on screen.
+    fn fit_popup(&mut self) {
+        let list = self.shown();
+        let rows = if list.is_empty() {
+            self.tamil_rows() + 1
+        } else {
+            list.len()
+        };
+        let section = (list.predicted > 0).then_some(list.tamil);
+        self.popup.set_list(rows, section);
+        let (w, h) = self.popup.size();
+        let Some(anchor) = self.anchor else {
+            return;
+        };
+        if (w, h) == self.popup_size {
+            return;
+        }
+        self.popup_size = (w, h);
+        let (x, y) = caret::place(anchor, w, h, self.popup.gap());
+        // SAFETY: our own window; SWP_NOACTIVATE keeps focus in the app.
+        unsafe {
+            let _ = SetWindowPos(
+                self.popup.hwnd,
+                None,
+                x,
+                y,
+                w,
+                h,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
         }
     }
 
@@ -947,7 +1072,7 @@ impl App {
         self.ensure_candidates();
         let options = self.candidates();
         self.learn(&options);
-        let text = self.composer.render(Some(&options)) + suffix;
+        let text = self.composer.render(Some(&options.words)) + suffix;
         self.discard();
         self.emit(Out::Text(text));
     }
@@ -1148,15 +1273,16 @@ impl App {
         true
     }
 
-    /// The row showing the current word's learned pick (never the English
-    /// row, the last one), if picks are remembered.
-    fn learned_row(&self, options: &[String]) -> Option<usize> {
+    /// The row showing the current word's learned pick (among the Tamil
+    /// suggestions), if picks are remembered.
+    fn learned_row(&self, options: &Options) -> Option<usize> {
         if !self.config.remember_picks {
             return None;
         }
         let word = self.learned.get(&self.composer.key()?)?;
-        let tamil = &options[..options.len().saturating_sub(1)];
-        tamil.iter().position(|o| o == word)
+        options.words[..options.tamil]
+            .iter()
+            .position(|o| o == word)
     }
 
     fn view(&self) -> View {
@@ -1174,10 +1300,11 @@ impl App {
         View {
             input: self.composer.text().to_string(),
             cursor: self.composer.cursor(),
-            preview: self.composer.render(Some(&candidates)),
+            preview: self.composer.render(Some(&candidates.words)),
             english: candidates.len().checked_sub(1),
             learned: self.learned_row(&candidates),
-            candidates,
+            predicted: candidates.tamil..candidates.tamil + candidates.predicted,
+            candidates: candidates.words,
             selected: self.composer.selected(),
             hint,
             warn,
@@ -1260,12 +1387,18 @@ fn on_engine_events() {
                     a.cancel_convert(None);
                     failed = Some(e);
                 }
-                Event::Done { key, candidates } => {
+                Event::Done {
+                    key,
+                    candidates,
+                    predictions,
+                } => {
                     a.pending.remove(&key);
                     // Bounded: typed words should not pile up in memory.
                     if a.cache.len() >= MAX_CACHE {
                         a.cache.clear();
+                        a.predicted.clear();
                     }
+                    a.predicted.insert(key.clone(), predictions);
                     a.cache.insert(key, candidates);
                 }
             }
@@ -1343,6 +1476,7 @@ fn open_settings() {
     let actions = settings::Actions {
         apply: apply_settings,
         suggest: suggest_words,
+        clear_history,
         on_close: settings_closed,
     };
     settings::open(current_values(), actions);
@@ -1358,10 +1492,27 @@ fn current_values() -> settings::Values {
         insert_mode: config.insert_mode,
         beam: config.beam,
         remember_picks: config.remember_picks,
+        predict: config.predict,
         theme: config.theme,
         autostart,
         learned,
     }
+}
+
+/// Settings "Clear typing history…": forgets it and deletes the file.
+fn clear_history() -> Result<(), String> {
+    let result = with_app(|a| {
+        a.history.clear();
+        a.history_dirty = false;
+        match &a.history_path {
+            Some(path) => a
+                .history
+                .save(path)
+                .map_err(|e| format!("Couldn't delete the typing history: {e:#}")),
+            None => Ok(()),
+        }
+    });
+    result.unwrap_or_else(|| Err("Ezhuthu is busy; try again".into()))
 }
 
 /// The model's suggestions for `key` (Settings > Words); none until it loads.
@@ -1447,6 +1598,7 @@ fn apply_settings(v: &settings::Values) -> Result<(), String> {
         new.insert_mode = v.insert_mode;
         new.beam = v.beam;
         new.remember_picks = v.remember_picks;
+        new.predict = v.predict;
         new.theme = v.theme;
         new.save(&a.config_path)
             .map_err(|e| format!("Couldn't save the settings: {e:#}"))?;
