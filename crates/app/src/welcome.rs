@@ -86,6 +86,13 @@ struct Colors {
     key_down_text: Rgb,
     popup: Rgb,
     popup_line: Rgb,
+    /// The example popup's input box, divider and number key caps, as
+    /// in the real popup.
+    popup_input: Rgb,
+    popup_input_line: Rgb,
+    popup_sep: Rgb,
+    popup_key: Rgb,
+    popup_key_text: Rgb,
     hover: Rgb,
 }
 
@@ -102,6 +109,11 @@ const LIGHT: Colors = Colors {
     key_down_text: 0x7A4A00,
     popup: 0xFFFFFF,
     popup_line: 0xC8C8C8,
+    popup_input: 0xF4F5F7,
+    popup_input_line: 0xE1E3E6,
+    popup_sep: 0xECECEC,
+    popup_key: 0xEEF0F2,
+    popup_key_text: 0x555555,
     hover: 0xEBEDF0,
 };
 
@@ -116,8 +128,13 @@ const DARK: Colors = Colors {
     key_line: 0x5A5A5A,
     key_down: 0x5C4313,
     key_down_text: 0xFFD48A,
-    popup: 0x303030,
+    popup: 0x2B2B2B,
     popup_line: 0x4A4A4A,
+    popup_input: 0x1F1F1F,
+    popup_input_line: 0x3D3D3D,
+    popup_sep: 0x3A3A3A,
+    popup_key: 0x3A3A3A,
+    popup_key_text: 0xCFCFCF,
     hover: 0x333333,
 };
 
@@ -713,70 +730,153 @@ impl Ctx<'_> {
         }
     }
 
-    /// A small suggestion popup like the real one.
-    fn popup(&mut self, x: f32, y: f32, rows: &[&str], selected: usize, english: Option<usize>) {
-        let (w, row_h, pad) = (240.0, 26.0, 5.0);
-        let h = rows.len() as f32 * row_h + 2.0 * pad;
+    /// A small copy of the real popup: the typed text in its input box,
+    /// the Tamil preview, then numbered suggestions (the selected one
+    /// tinted orange, EN on the typed word, a sparkle on a learned pick).
+    fn popup(&mut self, x: f32, y: f32, p: &Mini, t: f32) {
+        let (w, pad, input_h, preview_h, row_h) = (240.0, 6.0, 26.0, 26.0, 24.0);
+        let h = pad + input_h + 3.0 + preview_h + 7.0 + p.rows.len() as f32 * row_h + pad;
         let c = self.c;
+        let frame = (self.x(x), self.y(y), self.n(w), self.n(h));
         self.cv.round_rect(
-            self.x(x),
-            self.y(y),
-            self.n(w),
-            self.n(h),
-            self.n(6.0),
+            frame.0,
+            frame.1,
+            frame.2,
+            frame.3,
+            self.n(8.0),
             c.popup,
             1.0,
         );
-        self.cv.round_rect_line(
-            (self.x(x), self.y(y), self.n(w), self.n(h)),
+        self.cv
+            .round_rect_line(frame, self.n(8.0), self.n(1.0), c.popup_line, 1.0);
+
+        // The input box: typed text, an orange caret, "EN".
+        let (bx, by, bw) = (x + pad, y + pad, w - 2.0 * pad);
+        let input = (self.x(bx), self.y(by), self.n(bw), self.n(input_h));
+        self.cv.round_rect(
+            input.0,
+            input.1,
+            input.2,
+            input.3,
             self.n(6.0),
-            self.n(1.0),
-            c.popup_line,
+            c.popup_input,
             1.0,
         );
-        for (i, word) in rows.iter().enumerate() {
-            let ry = y + pad + i as f32 * row_h;
-            let on = i == selected;
+        self.cv
+            .round_rect_line(input, self.n(6.0), self.n(1.0), c.popup_input_line, 1.0);
+        self.text(
+            self.f.small,
+            "EN",
+            (bx, by, bw - 8.0, input_h),
+            c.muted,
+            DT_RIGHT,
+        );
+        self.text(
+            self.f.body,
+            p.typed,
+            (bx + 8.0, by, bw - 40.0, input_h),
+            c.text,
+            DT_LEFT,
+        );
+        if (t * 2.0).fract() < 0.6 {
+            let cx = self.x(bx + 9.0 + self.width(self.f.body, p.typed));
+            let (top, bottom) = (self.y(by + 6.0), self.y(by + input_h - 6.0));
+            self.cv
+                .line((cx, top), (cx, bottom), self.n(1.4), ORANGE, 1.0);
+        }
+
+        // The preview and a divider.
+        let py = by + input_h + 3.0;
+        self.text(
+            self.f.tamil,
+            p.preview,
+            (bx + 4.0, py, bw - 8.0, preview_h),
+            c.text,
+            DT_LEFT,
+        );
+        let sep_y = py + preview_h + 2.0;
+        self.cv.round_rect(
+            self.x(bx + 4.0),
+            self.y(sep_y),
+            self.n(bw - 8.0),
+            self.n(1.0).max(1.0),
+            0.0,
+            c.popup_sep,
+            1.0,
+        );
+
+        // The suggestions.
+        let mut ry = sep_y + 5.0;
+        for (i, word) in p.rows.iter().enumerate() {
+            let on = i == p.selected;
             if on {
-                let hl = self.highlight;
+                let tint = mix(c.popup, ORANGE, 0.18);
                 self.cv.round_rect(
                     self.x(x + 4.0),
                     self.y(ry),
                     self.n(w - 8.0),
                     self.n(row_h),
-                    self.n(4.0),
-                    hl,
+                    self.n(6.0),
+                    tint,
                     1.0,
                 );
             }
-            let (fg, num) = if on {
-                (0xFFFFFF, 0xFFFFFF)
+            let (key_fill, key_text) = if on {
+                (ORANGE, TILE)
             } else {
-                (c.text, c.muted)
+                (c.popup_key, c.popup_key_text)
             };
+            let (kx, ky, k) = (x + 10.0, ry + 4.0, 16.0);
+            self.cv.round_rect(
+                self.x(kx),
+                self.y(ky),
+                self.n(k),
+                self.n(k),
+                self.n(4.0),
+                key_fill,
+                1.0,
+            );
             self.text(
                 self.f.small,
                 &(i + 1).to_string(),
-                (x + 12.0, ry, 14.0, row_h),
-                num,
-                DT_LEFT,
+                (kx, ky, k, k),
+                key_text,
+                DT_CENTER,
             );
             self.text(
                 self.f.tamil,
                 word,
-                (x + 30.0, ry, w - 40.0, row_h),
-                fg,
+                (x + 32.0, ry, w - 60.0, row_h),
+                c.text,
                 DT_LEFT,
             );
-            if english == Some(i) {
+            if p.english == Some(i) {
+                let cw = self.width(self.f.small, "EN") + 10.0;
+                let (cx, cy, ch) = (x + w - 12.0 - cw, ry + 5.0, 14.0);
+                self.cv.round_rect(
+                    self.x(cx),
+                    self.y(cy),
+                    self.n(cw),
+                    self.n(ch),
+                    self.n(7.0),
+                    c.popup_key,
+                    1.0,
+                );
                 self.text(
                     self.f.small,
-                    "English",
-                    (x, ry, w - 14.0, row_h),
-                    num,
-                    DT_RIGHT,
+                    "EN",
+                    (cx, cy, cw, ch),
+                    c.popup_key_text,
+                    DT_CENTER,
                 );
             }
+            if p.learned == Some(i) {
+                let (cx, cy) = (self.x(x + w - 20.0), self.y(ry + row_h / 2.0 + 1.0));
+                self.cv.star(cx, cy, self.n(5.0), ORANGE, 1.0);
+                self.cv
+                    .star(cx + self.n(6.0), cy - self.n(5.0), self.n(2.5), ORANGE, 1.0);
+            }
+            ry += row_h;
         }
     }
 
@@ -963,6 +1063,16 @@ fn scene_toggle(ctx: &mut Ctx, t: f32) {
     );
 }
 
+/// What the example popup shows (see `Ctx::popup`).
+struct Mini<'a> {
+    typed: &'a str,
+    preview: &'a str,
+    rows: &'a [&'a str],
+    selected: usize,
+    english: Option<usize>,
+    learned: Option<usize>,
+}
+
 fn scene_pick(ctx: &mut Ctx, t: f32) {
     let t = t % 4.6;
     let word = "natchathiram";
@@ -973,13 +1083,21 @@ fn scene_pick(ctx: &mut Ctx, t: f32) {
     } else {
         prefix(word, n)
     };
-    ctx.field(40.0, 30.0, 300.0, &text, t, true, false);
+    ctx.field(20.0, 40.0, 220.0, &text, t, true, false);
     if n >= 3 && !done {
         let typed_word = prefix(word, n);
         let rows = ["நட்சத்திரம்", "நட்சதிரம்", "நட்சாத்திரம்", typed_word.as_str()];
-        ctx.popup(80.0, 74.0, &rows, 0, Some(3));
+        let mini = Mini {
+            typed: &typed_word,
+            preview: rows[0],
+            rows: &rows,
+            selected: 0,
+            english: Some(3),
+            learned: None,
+        };
+        ctx.popup(256.0, 8.0, &mini, t);
     }
-    ctx.keys(430.0, 150.0, &["Space"], |_| (2.25..2.6).contains(&t));
+    ctx.keys(130.0, 118.0, &["Space"], |_| (2.25..2.6).contains(&t));
 }
 
 fn scene_english(ctx: &mut Ctx, t: f32) {
@@ -992,36 +1110,65 @@ fn scene_english(ctx: &mut Ctx, t: f32) {
     } else {
         format!("வணக்கம் {}", prefix(word, n))
     };
-    ctx.field(40.0, 30.0, 300.0, &text, t, true, false);
+    ctx.field(20.0, 40.0, 220.0, &text, t, true, false);
     if n >= 1 && !done {
         let typed_word = prefix(word, n);
         let rows = ["ஹலோ", "ஹெல்லோ", typed_word.as_str()];
         let selected = if t > 1.6 { 2 } else { 0 };
-        ctx.popup(120.0, 74.0, &rows, selected, Some(2));
+        let mini = Mini {
+            typed: &typed_word,
+            preview: rows[selected],
+            rows: &rows,
+            selected,
+            english: Some(2),
+            learned: None,
+        };
+        ctx.popup(256.0, 20.0, &mini, t);
     }
-    ctx.keys(430.0, 150.0, &["3"], |_| (2.05..2.5).contains(&t));
+    ctx.keys(130.0, 118.0, &["3"], |_| (2.05..2.5).contains(&t));
 }
 
 fn scene_learn(ctx: &mut Ctx, t: f32) {
     let t = t % 5.2;
     let c = ctx.c;
     let first = t < 2.6;
-    let label = if first { "First time" } else { "Next time" };
+    let (label, note) = if first {
+        ("First time", "You pick the second one")
+    } else {
+        ("Next time", "It comes first, with a sparkle")
+    };
+    ctx.text(
+        ctx.f.title,
+        label,
+        (20.0, 66.0, 220.0, 32.0),
+        c.text,
+        DT_LEFT,
+    );
     ctx.text(
         ctx.f.body,
-        label,
-        (40.0, 20.0, 160.0, 26.0),
+        note,
+        (20.0, 100.0, 230.0, 26.0),
         c.muted,
         DT_LEFT,
     );
-    ctx.field(40.0, 50.0, 140.0, "thamil", t, false, false);
-    if first {
-        let rows = ["தமிழ்", "தமில்", "தாமில்", "thamil"];
-        ctx.popup(220.0, 30.0, &rows, if t > 1.1 { 1 } else { 0 }, Some(3));
+    let (rows, selected, learned) = if first {
+        (
+            ["தமிழ்", "தமில்", "தாமில்", "thamil"],
+            usize::from(t > 1.1),
+            None,
+        )
     } else {
-        let rows = ["தமில்", "தமிழ்", "தாமில்", "thamil"];
-        ctx.popup(220.0, 30.0, &rows, 0, Some(3));
-    }
+        (["தமில்", "தமிழ்", "தாமில்", "thamil"], 0, Some(0))
+    };
+    let mini = Mini {
+        typed: "thamil",
+        preview: rows[selected],
+        rows: &rows,
+        selected,
+        english: Some(3),
+        learned,
+    };
+    ctx.popup(256.0, 8.0, &mini, t);
 }
 
 fn scene_convert(ctx: &mut Ctx, t: f32) {
