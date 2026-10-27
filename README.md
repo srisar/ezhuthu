@@ -104,6 +104,13 @@ Already typed something in English letters, or pasted it from elsewhere? Select 
 
 Right-click the tray icon and choose **Settings...** (launching Ezhuthu again while it's running also opens it).
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/settings-general.png" alt="Settings, General tab: Typing (suggestions per word, insert text by), Learning (remember picks, complete words), Appearance (popup theme) and Startup, each section with an icon and a help line under each setting"></td>
+    <td width="50%"><img src="docs/images/settings-history.png" alt="Settings, History tab: a searchable list of typed words with the Tamil word, times used and when last used, and Open file, Remove and Remove all buttons"></td>
+  </tr>
+</table>
+
 - **General** sets:
   - suggestions per word;
   - how text is inserted (typing, or pasting for apps that garble typed Tamil);
