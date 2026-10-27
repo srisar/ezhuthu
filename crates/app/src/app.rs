@@ -32,9 +32,10 @@ use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTS
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, GetKeyboardLayout, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
-    RegisterHotKey, ToUnicodeEx, UnregisterHotKey, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN,
-    VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN,
-    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_UP,
+    RegisterHotKey, ToUnicodeEx, UnregisterHotKey, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE,
+    VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN,
+    VK_MENU, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT,
+    VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -99,8 +100,6 @@ const MAX_CACHE: usize = 2000;
 /// Give up waiting for our injected events after this long (e.g. UIPI
 /// silently dropped them), so real keys are never held back for good.
 const IN_FLIGHT_TIMEOUT: Duration = Duration::from_millis(500);
-
-const HINT: &str = "↑↓ or 1–5 choose · Space / Enter insert · Esc discard";
 
 enum Status {
     Loading,
@@ -1077,6 +1076,11 @@ impl App {
             }
             match ev.vk {
                 v if v == VK_BACK.0 => self.discard(),
+                // Ctrl+← / Ctrl+→: to the start or end of the word.
+                v if v == VK_LEFT.0 || v == VK_RIGHT.0 => {
+                    self.composer.cursor_to(v == VK_RIGHT.0);
+                    self.invalidate();
+                }
                 v if v == b'R' as u16 => {
                     self.flash = Some("Refine (Ctrl+R) is not available yet".into());
                     self.invalidate();
@@ -1095,6 +1099,20 @@ impl App {
             v if v == VK_SPACE.0 && composing => self.commit(" "),
             v if v == VK_BACK.0 && composing => {
                 self.composer.pop();
+                self.after_edit();
+            }
+            // Editing mid-word: move the cursor, delete after it.
+            v if (v == VK_LEFT.0 || v == VK_RIGHT.0) && composing => {
+                self.composer
+                    .move_cursor(if v == VK_LEFT.0 { -1 } else { 1 });
+                self.invalidate();
+            }
+            v if (v == VK_HOME.0 || v == VK_END.0) && composing => {
+                self.composer.cursor_to(v == VK_END.0);
+                self.invalidate();
+            }
+            v if v == VK_DELETE.0 && composing => {
+                self.composer.delete();
                 self.after_edit();
             }
             v if (v == VK_UP.0 || v == VK_DOWN.0) && composing => {
@@ -1138,17 +1156,13 @@ impl App {
             match &self.status {
                 Status::Loading => ("Loading the model…".to_string(), false),
                 Status::Failed(e) => (format!("Model failed to load: {e}"), true),
-                Status::Ready => {
-                    let keys = match self.rows() {
-                        n @ ..=9 => format!("1–{n}"),
-                        _ => "1–9, 0".to_string(),
-                    };
-                    (HINT.replace("1–5", &keys), false)
-                }
+                // Empty: the popup shows its key tips.
+                Status::Ready => (String::new(), false),
             }
         };
         View {
             input: self.composer.text().to_string(),
+            cursor: self.composer.cursor(),
             preview: self.composer.render(Some(&candidates)),
             english: candidates.len().checked_sub(1),
             candidates,

@@ -1,18 +1,26 @@
-//! The popup: a non-activating, topmost window painted with GDI.
+//! The popup: a non-activating, topmost window with what's being typed and
+//! its suggestions.
 //!
 //! It never takes focus (the target app keeps it, which is what lets this
-//! work over the Start/search box). Text is drawn with DrawTextW, which
-//! shapes Tamil through Uniscribe, in "Nirmala UI" (ships with Windows).
+//! work over the Start/search box). It is drawn on a `Canvas` (smooth
+//! rounded shapes; text by DrawTextW, which shapes Tamil through Uniscribe,
+//! in "Nirmala UI"). On Windows 11 the system rounds its corners and draws
+//! the border and shadow; elsewhere it has a 1 px border of its own.
+//!
+//! Layout, top to bottom: the typed text in an input box (labelled EN), the
+//! Tamil preview, then the suggestions (numbered key caps, the selected one
+//! tinted orange, the typed word last with an EN tag), then key tips or a
+//! status line.
 
 use anyhow::Result;
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_HIGHLIGHT, CreateCompatibleBitmap,
-    CreateCompatibleDC, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DRAW_TEXT_FORMAT,
-    DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
-    DrawTextW, FW_NORMAL, FillRect, GetDC, GetSysColor, GetTextMetricsW, HDC, HFONT, HGDIOBJ,
-    OUT_DEFAULT_PRECIS, ReleaseDC, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TEXTMETRICW,
-    TRANSPARENT,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DT_CENTER, DT_LEFT,
+    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, FW_NORMAL, FW_SEMIBOLD, GetDC,
+    GetTextMetricsW, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, ReleaseDC, SelectObject, TEXTMETRICW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CreateWindowExW, IDC_ARROW, LoadCursorW, RegisterClassExW, WNDCLASSEXW, WNDPROC,
@@ -20,25 +28,36 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
+use crate::canvas::{Canvas, Rgb, mix};
 use crate::win::{instance, scale, wide};
 
 /// What to draw, built from the app state on each paint.
 pub struct View {
     pub input: String,
+    /// The caret's place in `input`, in characters.
+    pub cursor: usize,
     pub preview: String,
     pub candidates: Vec<String>,
     /// The row holding the word as typed (inserted as English), if shown.
     pub english: Option<usize>,
     pub selected: usize,
+    /// A status line (loading, errors); empty shows the key tips instead.
     pub hint: String,
     pub warn: bool,
 }
+
+/// Ezhuthu's accent (the logo's cursor), and dark text on it.
+const ORANGE: Rgb = 0xF5A524;
+const ON_ORANGE: Rgb = 0x15171C;
+/// Popup width (96-DPI units).
+const WIDTH: i32 = 300;
 
 struct Fonts {
     input: HFONT,
     tamil: HFONT,
     cand: HFONT,
     small: HFONT,
+    key: HFONT,
     input_h: i32,
     tamil_h: i32,
     cand_h: i32,
@@ -47,16 +66,16 @@ struct Fonts {
 
 impl Fonts {
     fn new(dpi: u32) -> Self {
-        let make = |pt: i32, face: &str| {
+        let make = |tenths: i32, weight: i32, face: &str| {
             let face = wide(face);
             // SAFETY: the face name is NUL-terminated and outlives the call.
             unsafe {
                 CreateFontW(
-                    -(pt * dpi as i32 / 72),
+                    -(tenths * dpi as i32 / 720),
                     0,
                     0,
                     0,
-                    FW_NORMAL.0 as i32,
+                    weight,
                     0,
                     0,
                     0,
@@ -69,11 +88,13 @@ impl Fonts {
                 )
             }
         };
-        let (input, tamil, cand, small) = (
-            make(11, "Segoe UI"),
-            make(15, "Nirmala UI"),
-            make(13, "Nirmala UI"),
-            make(9, "Segoe UI"),
+        let (normal, semibold) = (FW_NORMAL.0 as i32, FW_SEMIBOLD.0 as i32);
+        let (input, tamil, cand, small, key) = (
+            make(110, normal, "Segoe UI"),
+            make(150, normal, "Nirmala UI"),
+            make(125, normal, "Nirmala UI"),
+            make(80, normal, "Segoe UI"),
+            make(80, semibold, "Segoe UI"),
         );
         Self {
             input_h: line_height(input),
@@ -84,13 +105,14 @@ impl Fonts {
             tamil,
             cand,
             small,
+            key,
         }
     }
 }
 
 impl Drop for Fonts {
     fn drop(&mut self) {
-        for f in [self.input, self.tamil, self.cand, self.small] {
+        for f in [self.input, self.tamil, self.cand, self.small, self.key] {
             // SAFETY: we created these fonts and they are not selected anywhere.
             let _ = unsafe { DeleteObject(HGDIOBJ(f.0)) };
         }
@@ -110,6 +132,56 @@ fn line_height(font: HFONT) -> i32 {
     }
 }
 
+/// The popup's colours, light or dark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Palette {
+    background: Rgb,
+    /// Drawn only where Windows doesn't draw the border (before Windows 11).
+    border: Rgb,
+    input: Rgb,
+    input_line: Rgb,
+    separator: Rgb,
+    text: Rgb,
+    muted: Rgb,
+    /// Key caps (numbers, key tips) and the EN tags.
+    key: Rgb,
+    key_text: Rgb,
+    warning: Rgb,
+}
+
+impl Palette {
+    const LIGHT: Self = Self {
+        background: 0xFFFFFF,
+        border: 0xC8C8C8,
+        input: 0xF4F5F7,
+        input_line: 0xE1E3E6,
+        separator: 0xECECEC,
+        text: 0x1B1B1B,
+        muted: 0x6E6E6E,
+        key: 0xEEF0F2,
+        key_text: 0x555555,
+        warning: 0xC02000,
+    };
+    /// Close to Windows 11's dark menus and flyouts.
+    const DARK: Self = Self {
+        background: 0x2B2B2B,
+        border: 0x454545,
+        input: 0x1F1F1F,
+        input_line: 0x3D3D3D,
+        separator: 0x3A3A3A,
+        text: 0xF2F2F2,
+        muted: 0xA3A3A3,
+        key: 0x3A3A3A,
+        key_text: 0xCFCFCF,
+        warning: 0xFF7B6B,
+    };
+
+    /// The selected row's tint: orange washed into the background.
+    fn selected(&self) -> Rgb {
+        mix(self.background, ORANGE, 0.18)
+    }
+}
+
 struct Layout {
     w: i32,
     h: i32,
@@ -126,6 +198,8 @@ pub struct Popup {
     rows: usize,
     fonts: Fonts,
     palette: Palette,
+    /// Windows rounds the corners and draws the border (Windows 11).
+    system_frame: bool,
 }
 
 impl Popup {
@@ -159,13 +233,30 @@ impl Popup {
                 None,
             )?
         };
-        Ok(Self {
+        // Rounded corners with the system border and shadow on Windows 11;
+        // the call fails on older Windows, where we draw a border instead.
+        let round = DWMWCP_ROUND;
+        // SAFETY: the attribute value is a DWM_WINDOW_CORNER_PREFERENCE of
+        // the size passed.
+        let system_frame = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &round as *const _ as *const _,
+                size_of_val(&round) as u32,
+            )
+        }
+        .is_ok();
+        let mut popup = Self {
             hwnd,
             dpi: 96,
             rows,
             fonts: Fonts::new(96),
             palette: Palette::LIGHT,
-        })
+            system_frame,
+        };
+        popup.set_dark(false);
+        Ok(popup)
     }
 
     pub fn set_dpi(&mut self, dpi: u32) {
@@ -178,6 +269,20 @@ impl Popup {
     /// Light or dark colours (takes effect at the next paint).
     pub fn set_dark(&mut self, dark: bool) {
         self.palette = if dark { Palette::DARK } else { Palette::LIGHT };
+        if self.system_frame {
+            // The system border in the palette's colour (0x00BBGGRR).
+            let c = self.palette.border;
+            let color = COLORREF(((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF));
+            // SAFETY: the attribute value is a COLORREF of the size passed.
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    self.hwnd,
+                    DWMWA_BORDER_COLOR,
+                    &color as *const _ as *const _,
+                    size_of::<COLORREF>() as u32,
+                )
+            };
+        }
     }
 
     pub fn set_rows(&mut self, rows: usize) {
@@ -200,35 +305,39 @@ impl Popup {
     fn layout(&self) -> Layout {
         let s = |v| scale(v, self.dpi);
         let f = &self.fonts;
-        let (pad, w) = (s(10), s(440));
-        let inner = |top, h| RECT {
+        let (pad, w) = (s(8), s(WIDTH));
+        let input = RECT {
             left: pad,
-            top,
+            top: pad + s(2),
             right: w - pad,
+            bottom: pad + s(2) + f.input_h + s(14),
+        };
+        let inner = |top, h| RECT {
+            left: pad + s(4),
+            top,
+            right: w - pad - s(4),
             bottom: top + h,
         };
-        let input = inner(pad, f.input_h + s(6));
-        let preview = inner(input.bottom + s(2), f.tamil_h + s(8));
+        let preview = inner(input.bottom + s(4), f.tamil_h + s(6));
         let sep = inner(preview.bottom + s(4), s(1).max(1));
-        let row_h = f.cand_h + s(4);
-        let mut top = sep.bottom + s(4);
+        let row_h = f.cand_h + s(8);
+        let mut top = sep.bottom + s(5);
         let rows = (0..self.rows)
             .map(|_| {
                 let r = RECT {
-                    left: pad / 2,
+                    left: s(5),
                     top,
-                    right: w - pad / 2,
+                    right: w - s(5),
                     bottom: top + row_h,
                 };
-                top += row_h;
+                top += row_h + s(1);
                 r
             })
             .collect();
-        let hint = inner(top + s(4), f.small_h + s(4));
-        // +2 for the 1 px border drawn around the edge.
+        let hint = inner(top + s(3), f.small_h + s(8));
         Layout {
-            w: w + 2,
-            h: hint.bottom + pad + 2,
+            w,
+            h: hint.bottom + pad,
             input,
             preview,
             sep,
@@ -244,197 +353,210 @@ impl Popup {
             .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
     }
 
-    /// Paints `view` into `hdc` through an off-screen buffer (no flicker).
+    /// Paints `view` into `hdc` (through a canvas, so there is no flicker).
     pub fn paint(&self, hdc: HDC, view: &View) {
         let l = self.layout();
-        let f = &self.fonts;
-        let p = &self.palette;
-        // SAFETY: plain query.
-        let highlight = COLORREF(unsafe { GetSysColor(COLOR_HIGHLIGHT) });
-        // SAFETY: the memory DC and bitmap are created, used and deleted here;
-        // every selected object is restored before deletion.
-        unsafe {
-            let mem = CreateCompatibleDC(Some(hdc));
-            let bmp = CreateCompatibleBitmap(hdc, l.w, l.h);
-            let old_bmp = SelectObject(mem, HGDIOBJ(bmp.0));
-            let old_font = SelectObject(mem, HGDIOBJ(f.input.0));
-            SetBkMode(mem, TRANSPARENT);
-            let full = RECT {
-                left: 0,
-                top: 0,
-                right: l.w,
-                bottom: l.h,
-            };
-            fill(mem, &full, p.border);
-            let inside = RECT {
-                left: 1,
-                top: 1,
-                right: l.w - 1,
-                bottom: l.h - 1,
-            };
-            fill(mem, &inside, p.background);
+        let Some(mut cv) = Canvas::new(l.w, l.h) else {
+            return;
+        };
+        let (f, p) = (&self.fonts, &self.palette);
+        let s = |v: i32| scale(v, self.dpi) as f32;
+        let fr = |r: &RECT| {
+            (
+                r.left as f32,
+                r.top as f32,
+                (r.right - r.left) as f32,
+                (r.bottom - r.top) as f32,
+            )
+        };
+        let one_line = DT_SINGLELINE | DT_VCENTER;
 
-            if view.input.is_empty() {
-                text(
-                    mem,
-                    f.input,
-                    p.muted,
-                    l.input,
-                    "type Tamil in English letters…",
-                    DT_LEFT,
-                );
+        cv.clear(p.background);
+        if !self.system_frame {
+            cv.round_rect_line((0.0, 0.0, l.w as f32, l.h as f32), 0.0, 1.0, p.border, 1.0);
+        }
+
+        // The typed text, in its input box with an orange caret and "EN".
+        let (x, y, bw, bh) = fr(&l.input);
+        cv.round_rect(x, y, bw, bh, s(7), p.input, 1.0);
+        cv.round_rect_line((x, y, bw, bh), s(7), s(1).max(1.0), p.input_line, 1.0);
+        let en_w = cv.measure(f.small, "EN").0;
+        let text_box = RECT {
+            left: l.input.left + scale(10, self.dpi),
+            right: l.input.right - scale(14, self.dpi) - en_w,
+            ..l.input
+        };
+        cv.text(
+            f.small,
+            "EN",
+            RECT {
+                right: l.input.right - scale(10, self.dpi),
+                ..l.input
+            },
+            p.muted,
+            DT_RIGHT | one_line,
+        );
+        if view.input.is_empty() {
+            cv.text(
+                f.input,
+                "type Tamil in English letters…",
+                text_box,
+                p.muted,
+                DT_LEFT | one_line,
+            );
+        } else {
+            let end = text_tail(&mut cv, f.input, &view.input, text_box, p.text);
+            // The caret sits after the first `cursor` characters: measured
+            // from the left when the text fits, else from its right end.
+            let before: String = view.input.chars().take(view.cursor).collect();
+            let after: String = view.input.chars().skip(view.cursor).collect();
+            let caret = if end < text_box.right {
+                text_box.left + cv.measure(f.input, &before).0
             } else {
-                let mut shown = view.input.clone();
-                shown.push('▏'); // caret
-                text_tail(mem, f.input, p.text, l.input, &shown);
+                end - cv.measure(f.input, &after).0
+            };
+            let caret_x = (caret + scale(1, self.dpi)) as f32;
+            let (cy, ch) = (y + bh / 2.0, f.input_h as f32 * 0.42);
+            cv.line(
+                (caret_x, cy - ch),
+                (caret_x, cy + ch),
+                s(2).max(1.5) * 0.75,
+                ORANGE,
+                1.0,
+            );
+        }
+
+        // The Tamil preview of the chosen suggestion.
+        text_tail(&mut cv, f.tamil, &view.preview, l.preview, p.text);
+        let (sx, sy, sw, _) = fr(&l.sep);
+        cv.round_rect(sx, sy, sw, s(1).max(1.0), 0.0, p.separator, 1.0);
+
+        // The suggestions.
+        for (i, (row, word)) in l.rows.iter().zip(&view.candidates).enumerate() {
+            let selected = i == view.selected;
+            let (rx, ry, rw, rh) = fr(row);
+            if selected {
+                cv.round_rect(rx, ry, rw, rh, s(7), p.selected(), 1.0);
             }
-            text_tail(mem, f.tamil, p.text, l.preview, &view.preview);
-            fill(mem, &l.sep, p.separator);
-
-            for (i, (row, cand)) in l.rows.iter().zip(&view.candidates).enumerate() {
-                let selected = i == view.selected;
-                if selected {
-                    fill(mem, row, highlight);
-                }
-                let (fg, num_color) = if selected {
-                    (p.selected_text, p.selected_text)
-                } else {
-                    (p.text, p.muted)
+            // The number's key cap (the tenth row is picked with 0).
+            let k = s(20);
+            let (kx, ky) = (rx + s(8), ry + (rh - k) / 2.0);
+            let (key_fill, key_text) = if selected {
+                (ORANGE, ON_ORANGE)
+            } else {
+                (p.key, p.key_text)
+            };
+            cv.round_rect(kx, ky, k, k, s(5), key_fill, 1.0);
+            let key_rect = RECT {
+                left: kx as i32,
+                top: ky as i32,
+                right: (kx + k) as i32,
+                bottom: (ky + k) as i32,
+            };
+            let number = ((i + 1) % 10).to_string();
+            cv.text(f.key, &number, key_rect, key_text, DT_CENTER | one_line);
+            let body = RECT {
+                left: row.left + scale(38, self.dpi),
+                right: row.right - scale(8, self.dpi),
+                ..*row
+            };
+            cv.text(f.cand, word, body, p.text, DT_LEFT | one_line);
+            if view.english == Some(i) {
+                let tw = cv.measure(f.small, "EN").0 as f32;
+                let (cw, ch) = (tw + s(12), s(16));
+                let cx = rx + rw - s(10) - cw;
+                let cy = ry + (rh - ch) / 2.0;
+                cv.round_rect(cx, cy, cw, ch, ch / 2.0, p.key, 1.0);
+                let chip = RECT {
+                    left: cx as i32,
+                    top: cy as i32,
+                    right: (cx + cw) as i32,
+                    bottom: (cy + ch) as i32,
                 };
-                let num_w = scale(26, self.dpi);
-                let num = RECT {
-                    left: row.left + scale(6, self.dpi),
-                    right: row.left + num_w,
-                    ..*row
-                };
-                let body = RECT {
-                    left: row.left + num_w,
-                    ..*row
-                };
-                // The tenth row is picked with 0.
-                let key = ((i + 1) % 10).to_string();
-                text(mem, f.small, num_color, num, &key, DT_LEFT);
-                text(mem, f.cand, fg, body, cand, DT_LEFT);
-                if view.english == Some(i) {
-                    let tag = RECT {
-                        right: row.right - scale(8, self.dpi),
-                        ..*row
-                    };
-                    text(mem, f.small, num_color, tag, "English", DT_RIGHT);
-                }
+                cv.text(f.small, "EN", chip, p.key_text, DT_CENTER | one_line);
             }
+        }
 
-            let hint_color = if view.warn { p.warning } else { p.muted };
-            text(mem, f.small, hint_color, l.hint, &view.hint, DT_LEFT);
+        // Key tips, or a status line.
+        if view.hint.is_empty() {
+            self.key_tips(&mut cv, l.hint);
+        } else {
+            let color = if view.warn { p.warning } else { p.muted };
+            cv.text(f.small, &view.hint, l.hint, color, DT_CENTER | one_line);
+        }
 
-            let _ = BitBlt(hdc, 0, 0, l.w, l.h, Some(mem), 0, 0, SRCCOPY);
-            SelectObject(mem, old_font);
-            SelectObject(mem, old_bmp);
-            let _ = DeleteObject(HGDIOBJ(bmp.0));
-            let _ = DeleteDC(mem);
+        cv.blit(hdc);
+    }
+
+    /// "↑↓ choose  Space insert  Esc cancel", each key on a small key cap.
+    fn key_tips(&self, cv: &mut Canvas, r: RECT) {
+        let (f, p) = (&self.fonts, &self.palette);
+        let s = |v: i32| scale(v, self.dpi);
+        let tips = [("↑↓", "choose"), ("Space", "insert"), ("Esc", "cancel")];
+        let parts: Vec<(i32, i32)> = tips
+            .iter()
+            .map(|(key, label)| {
+                (
+                    cv.measure(f.small, key).0 + s(8),
+                    cv.measure(f.small, label).0,
+                )
+            })
+            .collect();
+        let gap = s(4);
+        let space = s(12);
+        let total: i32 =
+            parts.iter().map(|(k, t)| k + gap + t).sum::<i32>() + space * (tips.len() as i32 - 1);
+        let mut x = r.left + ((r.right - r.left) - total) / 2;
+        let cap_h = s(16);
+        let cy = r.top + ((r.bottom - r.top) - cap_h) / 2;
+        let one_line = DT_SINGLELINE | DT_VCENTER;
+        for ((key, label), (kw, tw)) in tips.iter().zip(parts) {
+            cv.round_rect(
+                x as f32,
+                cy as f32,
+                kw as f32,
+                cap_h as f32,
+                s(4) as f32,
+                p.key,
+                1.0,
+            );
+            let cap = RECT {
+                left: x,
+                top: cy,
+                right: x + kw,
+                bottom: cy + cap_h,
+            };
+            cv.text(f.small, key, cap, p.key_text, DT_CENTER | one_line);
+            x += kw + gap;
+            let text = RECT {
+                left: x,
+                right: x + tw + s(2),
+                ..r
+            };
+            cv.text(f.small, label, text, p.muted, DT_LEFT | one_line);
+            x += tw + space;
         }
     }
 }
 
-/// The popup's colours, light or dark.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Palette {
-    background: COLORREF,
-    border: COLORREF,
-    separator: COLORREF,
-    text: COLORREF,
-    muted: COLORREF,
-    /// Text on the selected row (its background is the system highlight).
-    selected_text: COLORREF,
-    warning: COLORREF,
-}
-
-impl Palette {
-    const LIGHT: Self = Self {
-        background: rgb(0xFF, 0xFF, 0xFF),
-        border: rgb(0xC8, 0xC8, 0xC8),
-        separator: rgb(0xE6, 0xE6, 0xE6),
-        text: rgb(0x1B, 0x1B, 0x1B),
-        muted: rgb(0x6E, 0x6E, 0x6E),
-        selected_text: rgb(0xFF, 0xFF, 0xFF),
-        warning: rgb(0xC0, 0x20, 0x00),
-    };
-    /// Close to Windows 11's dark menus and flyouts.
-    const DARK: Self = Self {
-        background: rgb(0x2B, 0x2B, 0x2B),
-        border: rgb(0x48, 0x48, 0x48),
-        separator: rgb(0x3D, 0x3D, 0x3D),
-        text: rgb(0xF2, 0xF2, 0xF2),
-        muted: rgb(0xA3, 0xA3, 0xA3),
-        selected_text: rgb(0xFF, 0xFF, 0xFF),
-        warning: rgb(0xFF, 0x7B, 0x6B),
-    };
-}
-
-/// A COLORREF (which is 0x00BBGGRR) from red, green and blue.
-const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
-    COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
-}
-
-fn fill(dc: HDC, r: &RECT, color: COLORREF) {
-    // SAFETY: the brush is created, used and deleted here.
-    unsafe {
-        let brush = CreateSolidBrush(color);
-        FillRect(dc, r, brush);
-        let _ = DeleteObject(HGDIOBJ(brush.0));
-    }
-}
-
-fn text(dc: HDC, font: HFONT, color: COLORREF, mut r: RECT, s: &str, align: DRAW_TEXT_FORMAT) {
-    // An empty slice has a dangling pointer, and DrawTextW reads it even
-    // with a length of 0 (it crashed user32), so never pass one.
+/// Draws `s` left-aligned in `r`, or right-aligned when too long so the end
+/// (where the user is typing) stays visible. Returns the x where it ends.
+fn text_tail(cv: &mut Canvas, font: HFONT, s: &str, r: RECT, color: Rgb) -> i32 {
     if s.is_empty() {
-        return;
+        return r.left;
     }
-    let mut buf: Vec<u16> = s.encode_utf16().collect();
-    // SAFETY: `dc` is a valid DC; the font stays alive while selected.
-    unsafe {
-        SelectObject(dc, HGDIOBJ(font.0));
-        SetTextColor(dc, color);
-        DrawTextW(
-            dc,
-            &mut buf,
-            &mut r,
-            align | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-        );
-    }
-}
-
-/// Left-aligned text, but right-aligned when too long, so the end
-/// (where the user is typing) stays visible.
-fn text_tail(dc: HDC, font: HFONT, color: COLORREF, r: RECT, s: &str) {
-    if s.is_empty() {
-        return; // see text
-    }
-    let mut buf: Vec<u16> = s.encode_utf16().collect();
-    let mut calc = r;
-    // SAFETY: DT_CALCRECT only measures.
-    unsafe {
-        SelectObject(dc, HGDIOBJ(font.0));
-        DrawTextW(
-            dc,
-            &mut buf,
-            &mut calc,
-            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
-        );
-    }
-    let align = if calc.right - calc.left > r.right - r.left {
-        DT_RIGHT
-    } else {
-        DT_LEFT
-    };
-    text(dc, font, color, r, s, align);
+    let width = cv.measure(font, s).0;
+    let fits = width <= r.right - r.left;
+    let align = if fits { DT_LEFT } else { DT_RIGHT };
+    cv.text(font, s, r, color, align | DT_SINGLELINE | DT_VCENTER);
+    if fits { r.left + width } else { r.right }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
     use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
 
     unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -445,6 +567,7 @@ mod tests {
     fn view(input: &str, preview: &str, candidates: &[&str]) -> View {
         View {
             input: input.into(),
+            cursor: input.chars().count(),
             preview: preview.into(),
             candidates: candidates.iter().map(|s| s.to_string()).collect(),
             english: candidates.len().checked_sub(1),
@@ -461,23 +584,15 @@ mod tests {
     #[ignore]
     fn popup_preview() {
         use windows::Win32::Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDIBits, SelectObject,
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, DIB_RGB_COLORS, GetDIBits,
         };
         let mut popup = Popup::create(Some(proc), 6).unwrap();
         popup.set_dpi(144);
-        let mut v = view(
-            "natchathiram",
-            "நட்சத்திரம்",
-            &[
-                "நட்சத்திரம்",
-                "நட்சதிரம்",
-                "நட்சாத்திரம்",
-                "நட்சாதிரம்",
-                "நாட்சத்திரம்",
-                "natchathiram",
-            ],
+        let v = view(
+            "vanakkam",
+            "வணக்கம்",
+            &["வணக்கம்", "வனக்கம்", "வணக்காம்", "வானக்கம்", "வனாக்கம்", "vanakkam"],
         );
-        v.hint = "↑↓ or 1–6 choose · Space / Enter insert · Esc discard".into();
         let (w, h) = popup.size();
         for (dark, name) in [(false, "light"), (true, "dark")] {
             popup.set_dark(dark);
@@ -545,8 +660,20 @@ mod tests {
             popup.set_dpi(dpi);
             popup.paint(dc, &view("", "", &[]));
             popup.paint(dc, &view("amma", "அம்மா", &["அம்மா", "ஆம்மா", "amma"]));
+            let mut status = view("amma", "", &[]);
+            status.hint = "Loading the model…".into();
+            popup.paint(dc, &status);
         }
         // SAFETY: we created it.
         let _ = unsafe { DeleteDC(dc) };
+    }
+
+    #[test]
+    fn rows_are_clickable_where_drawn() {
+        let popup = Popup::create(Some(proc), 3).unwrap();
+        let l = popup.layout();
+        let r = l.rows[1];
+        assert_eq!(popup.row_at(r.left + 4, r.top + 2), Some(1));
+        assert_eq!(popup.row_at(r.left + 4, l.input.top), None);
     }
 }

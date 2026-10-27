@@ -80,11 +80,13 @@ Ezhuthu lives in the tray. **Ctrl+Alt+T** turns Tamil mode on or off. The tray i
 | Enter | insert the chosen word without a space |
 | 1–9 (0 for a tenth row) | insert that suggestion and a space |
 | ↑ / ↓ | choose a suggestion |
+| ← / →, Home / End | move within the word to fix a letter (Ctrl+← / → jump to its start or end) |
+| Delete | delete the letter after the cursor |
 | Backspace / Ctrl+Backspace | delete a letter / drop the word |
 | Esc | drop the word |
-| any other key (Tab, arrows, Ctrl+S…) | insert the word, then the key does its usual job |
+| any other key (Tab, Page Up, Ctrl+S…) | insert the word, then the key does its usual job |
 
-The last row is always the word exactly as you typed it, marked **English**: press its number, or ↓ to it and Space.
+The last row is always the word exactly as you typed it, marked **EN**: press its number, or ↓ to it and Space.
 
 Ezhuthu remembers your choices. When you insert a suggestion other than the first, it comes first the next time you type that word. Pick the original first suggestion again to undo this. Only the words you picked are kept, in `%APPDATA%\ezhuthu\learned.tsv` on your PC. See, change, add or remove them on the **Words** tab in Settings, or turn learning off on General.
 
