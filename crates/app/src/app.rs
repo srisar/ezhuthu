@@ -1568,7 +1568,6 @@ fn open_settings() {
     let actions = settings::Actions {
         apply: apply_settings,
         suggest: suggest_words,
-        clear_history,
         on_close: settings_closed,
     };
     settings::open(current_values(), actions);
@@ -1576,8 +1575,9 @@ fn open_settings() {
 
 fn current_values() -> settings::Values {
     let autostart = ezhuthu_install::autostart_enabled();
-    let (config, learned) =
-        with_app(|a| (a.config.clone(), a.learned.entries())).unwrap_or_default();
+    let (config, learned, history) =
+        with_app(|a| (a.config.clone(), a.learned.entries(), a.history.entries()))
+            .unwrap_or_default();
     settings::Values {
         hotkey: config.hotkey,
         convert_hotkey: config.convert_hotkey,
@@ -1588,23 +1588,9 @@ fn current_values() -> settings::Values {
         theme: config.theme,
         autostart,
         learned,
+        history,
+        forget: Vec::new(),
     }
-}
-
-/// Settings "Clear typing history…": forgets it and deletes the file.
-fn clear_history() -> Result<(), String> {
-    let result = with_app(|a| {
-        a.history.clear();
-        a.history_dirty = false;
-        match &a.history_path {
-            Some(path) => a
-                .history
-                .save(path)
-                .map_err(|e| format!("Couldn't delete the typing history: {e:#}")),
-            None => Ok(()),
-        }
-    });
-    result.unwrap_or_else(|| Err("Ezhuthu is busy; try again".into()))
 }
 
 /// The model's suggestions for `key` (Settings > Words); none until it loads.
@@ -1702,6 +1688,14 @@ fn apply_settings(v: &settings::Values) -> Result<(), String> {
                     .map_err(|e| format!("Couldn't save the learned words: {e:#}"))?;
             }
             a.learned_dirty = false;
+        }
+        if a.history.forget(&v.forget) {
+            if let Some(path) = &a.history_path {
+                a.history
+                    .save(path)
+                    .map_err(|e| format!("Couldn't save the typing history: {e:#}"))?;
+            }
+            a.history_dirty = false;
         }
         if new.beam != a.config.beam {
             a.restart_engine(new.beam);
